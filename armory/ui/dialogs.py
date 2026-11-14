@@ -1,6 +1,7 @@
 """Settings (Nexus account, links, deploying), adding games, the FOMOD wizard, picking a Nexus
 file, and a mod's files and conflicts."""
 import os
+import re
 import webbrowser
 
 from PyQt6.QtCore import Qt
@@ -879,10 +880,11 @@ class NexusFilesDialog(QDialog):
                 bits.append(f"⚠ for {tag}, an older update" if old else f"for {tag}")
             bits += [cat, human((f.get("size_kb") or 0) * 1024)]
             it = QListWidgetItem("   ·   ".join(bits))
-            tipt = (f.get("description") or "").replace("<br />", "\n")
+            tipt = re.sub(r"<br\s*/?>", "\n", f.get("description") or "", flags=re.I)
             if tag:
                 tipt = gamever.note(tag, now, game.name) + ("\n\n" + tipt if tipt else "")
-            it.setToolTip(tipt)
+            # a mod author's description: shown as text, never as HTML
+            it.setToolTip(theme.tip(tipt))
             if old:
                 it.setForeground(QColor(theme.BAD))
             it.setData(Qt.ItemDataRole.UserRole, f)

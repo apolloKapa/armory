@@ -1794,7 +1794,8 @@ class Window(QMainWindow):
         """after an install: what the mod needs that isn't here (or is off), with a button for all of it"""
         if getattr(self, "collection_queue", None) or mid not in self.store.mods:
             return  # a collection brings its own requirements
-        m = self.store.mods[mid]
+        # the stored record doesn't carry its own id (the list adds it when it shows mods)
+        m = dict(self.store.mods[mid], id=mid)
         missing = missing_requirements(self.store, m)
         if all(r.get("external") for r in missing):
             return  # website-only ones (a script extender, a loader) can't be seen, so they'd ask every time

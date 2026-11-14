@@ -201,7 +201,7 @@ def missing_requirements(store, m):
             have = store.find(nexus=r["mod_id"])
             if not have:
                 out.append(r)
-            elif have != m["id"] and not store.mods[have].get("enabled"):
+            elif have != m.get("id") and have in store.mods and not store.mods[have].get("enabled"):
                 out.append(dict(r, off=have))
     return out
 

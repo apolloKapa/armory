@@ -127,7 +127,9 @@ def restore(game, path):
     backup(game, "before-restore")
     with zipfile.ZipFile(path) as z:
         meta = json.loads(z.read("armory-saves.json"))
-        targets = [resolve(game, s) for s in meta["folders"]]
+        # only the game's own save folders: a backup can't name another folder to be emptied
+        known = {s: p for s, p in folders(game)}
+        targets = [known.get(s) if isinstance(s, str) else None for s in meta.get("folders", [])]
         for t in targets:
             if t and os.path.isdir(t):
                 shutil.rmtree(t)

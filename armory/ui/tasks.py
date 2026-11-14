@@ -28,10 +28,17 @@ class _Task(QRunnable):
         self.wants_progress = wants_progress
         self.sig = _Signals()
 
+    def _emit(self, signal, *args):
+        try:
+            signal.emit(*args)
+        except RuntimeError:
+            # the window is closing and took the signal object with it
+            pass
+
     def run(self):
         try:
             if self.wants_progress:
-                res = self.fn(lambda a, b: self.sig.progress.emit(int(a), int(b)))
+                res = self.fn(lambda a, b: self._emit(self.sig.progress, int(a), int(b)))
             else:
                 res = self.fn()
         except Exception as e:  # noqa: BLE001 - shown to the user
@@ -39,12 +46,13 @@ class _Task(QRunnable):
             expected = isinstance(e, (OSError, net.NetError)) or \
                 e.__class__.__name__ in ("LayoutError", "DeployError", "ParseError")
             if not expected or os.environ.get("ARMORY_DEBUG"):
-                traceback.print_exc()
+                from ..app import log
+                log(traceback.format_exc())
             if not expected:
                 msg = f"{e.__class__.__name__}: {msg}"
-            self.sig.fail.emit(msg)
+            self._emit(self.sig.fail, msg)
         else:
-            self.sig.done.emit(res)
+            self._emit(self.sig.done, res)
 
 
 def run(fn, done=None, fail=None, progress=None, pool=None):

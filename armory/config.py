@@ -17,6 +17,8 @@ CONF_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, 
 CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.join(HOME, ".cache"), "armory")
 DOWNLOADS = os.path.join(DATA, "downloads")
 CONF = os.path.join(CONF_DIR, "config.json")
+STATE = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.join(HOME, ".local/state"), "armory")
+LOG = os.path.join(STATE, "armory.log")
 SECRETS = os.path.join(CONF_DIR, "nexus.json")
 
 

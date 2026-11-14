@@ -176,6 +176,13 @@ def download(url, dest, progress=None, cancelled=lambda: False, headers=None, re
             return download(url, dest, progress, cancelled, headers, resume)
         with r:
             more = r.status == 206 and have
+            if more:
+                # carry on only if the server sends exactly the rest of the file, else start over
+                cr = r.headers.get("Content-Range") or ""
+                if not cr.replace(" ", "").lower().startswith(f"bytes{have}-"):
+                    r.close()
+                    os.unlink(part)
+                    return download(url, dest, progress, cancelled, headers, resume)
             if not more:
                 have = 0
             total = int(r.headers.get("Content-Length") or 0)

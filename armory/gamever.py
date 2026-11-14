@@ -9,12 +9,15 @@ KNOWN = {"bladeandsorcery": "1.0"}
 
 _TAG = re.compile(
     r"(?<![\w.])(?:"
-    r"U\s?(?P<u>\d{1,2}(?:\.\d{1,2})?)"                                  # U12, U 11.3
-    r"|(?:BaS|B&S|B\s?and\s?S|Blade\s?(?:&|and)\s?Sorcery)\s*(?:U|v|Update\s*)?\s*(?P<b>\d{1,2}(?:\.\d{1,2})?)"
-    r"|Update\s*(?P<up>\d{1,2}(?:\.\d{1,2})?)"                           # Update 12
-    r"|\(\s*(?P<p>1\.\d{1,2})\s*\)"                                      # Mod Name (1.0)
-    r"|(?:for|to|on)\s+(?P<f>1\.\d{1,2})(?![\d.])"                       # updated for 1.0
+    r"U ?(?P<u>\d{1,2}(?:\.\d{1,2})?)"                                  # U12, U 11.3
+    r"|(?:BaS|B&S|B ?and ?S|Blade ?(?:&|and) ?Sorcery) ?(?:U|v|Update ?)?(?P<b>\d{1,2}(?:\.\d{1,2})?)"
+    r"|Update ?(?P<up>\d{1,2}(?:\.\d{1,2})?)"                           # Update 12
+    r"|\( ?(?P<p>1\.\d{1,2}) ?\)"                                      # Mod Name (1.0)
+    r"|(?:for|to|on) (?P<f>1\.\d{1,2})(?![\d.])"                       # updated for 1.0
     r")(?![\w])", re.I)
+
+
+MAX_TEXT = 6000
 
 
 def supported(gid):
@@ -46,7 +49,10 @@ def from_text(*texts):
     """the newest game update named in a file's name / description / the mod's name"""
     best = None
     for t in texts:
-        for m in _TAG.finditer(str(t or "")):
+        # text from mod sites: one space between words and a sane length, so the pattern can't be made
+        # to crawl (a run of thousands of spaces after "BaS" used to take seconds)
+        text = " ".join(str(t or "")[:MAX_TEXT].split())
+        for m in _TAG.finditer(text):
             g = m.groupdict()
             if g["u"] or g["up"]:
                 parts = (g["u"] or g["up"]).split(".")
@@ -93,10 +99,15 @@ def current(gid, installed=()):
 
 
 def is_old(tag, now):
-    """made for an older update than the game's (only the first two numbers count: 1.0.2 is fine on 1.0)"""
+    """made for an older update than the game's (U11 on U12 is; 1.0 on 1.3 isn't)"""
     if not tag or not now:
         return False
-    return key(tag)[:2] < key(now)[:2]
+    t, n = key(tag), key(now)
+    if t[0] >= 1 and n[0] >= 1:
+        # since 1.0, the game's updates (1.2, 1.3 ...) keep mods working: their manifests all still
+        # say 1.0.0.0, so only a new major version would make a mod old
+        return t[0] < n[0]
+    return t[:2] < n[:2]
 
 
 def note(tag, now, game_name):
