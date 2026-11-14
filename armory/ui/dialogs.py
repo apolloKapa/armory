@@ -4,13 +4,13 @@ import os
 import webbrowser
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtGui import QColor, QPixmap
 from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame,
                              QGridLayout, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QRadioButton,
                              QScrollArea, QSpinBox, QStackedWidget, QTextBrowser, QTreeWidget, QTreeWidgetItem,
                              QVBoxLayout, QWidget)
 
-from .. import config, games, links, nexus, oauth
+from .. import config, gamever, games, links, nexus, oauth
 from ..config import human
 from . import tasks, theme
 from .theme import Segments, button, label, rounded
@@ -849,31 +849,51 @@ class FomodWizard(QDialog):
 
 class NexusFilesDialog(QDialog):
     """pick which file of a Nexus mod to download"""
-    def __init__(self, parent, title, files, current=None):
+    def __init__(self, parent, title, files, current=None, game=None, now=""):
         super().__init__(parent)
         self.setWindowTitle(f"Download {title}")
-        self.resize(700, 480)
+        self.resize(760, 480)
         self.choice = None
         v = QVBoxLayout(self)
         v.setContentsMargins(20, 18, 20, 16)
         v.addWidget(label(title, "title"))
-        v.addWidget(label("Pick a file. Main files are the mod itself; optional files add to it.", "muted"))
+        tagged = game is not None and gamever.supported(game.id)
+        hint = "Pick a file. Main files are the mod itself; optional files add to it."
+        if tagged and now:
+            hint += f" {game.name} is on {now}: files made for older updates are marked ⚠."
+        v.addWidget(label(hint, "muted", True))
         self.list = QListWidget()
         self.list.setObjectName("plain")
         order = {"MAIN": 0, "UPDATE": 1, "OPTIONAL": 2, "MISCELLANEOUS": 3, "OLD_VERSION": 4, "ARCHIVED": 5}
         files = sorted(files, key=lambda f: (order.get(f.get("category_name"), 9), -f.get("uploaded_timestamp", 0)))
+        best = None
         for f in files:
             if f.get("category_name") in ("ARCHIVED", "DELETED"):
                 continue
             cat = (f.get("category_name") or "").replace("_", " ").title()
-            it = QListWidgetItem(f"{f.get('name')}   v{f.get('version') or '?'}   ·   {cat}   ·   "
-                                 f"{human((f.get('size_kb') or 0) * 1024)}")
-            it.setToolTip((f.get("description") or "").replace("<br />", "\n"))
+            tag = gamever.from_text(f.get("name"), f.get("file_name"), f.get("description"), title) \
+                if tagged else ""
+            old = gamever.is_old(tag, now)
+            bits = [f"{f.get('name')}   v{f.get('version') or '?'}"]
+            if tag:
+                bits.append(f"⚠ for {tag}, an older update" if old else f"for {tag}")
+            bits += [cat, human((f.get("size_kb") or 0) * 1024)]
+            it = QListWidgetItem("   ·   ".join(bits))
+            tipt = (f.get("description") or "").replace("<br />", "\n")
+            if tag:
+                tipt = gamever.note(tag, now, game.name) + ("\n\n" + tipt if tipt else "")
+            it.setToolTip(tipt)
+            if old:
+                it.setForeground(QColor(theme.BAD))
             it.setData(Qt.ItemDataRole.UserRole, f)
             self.list.addItem(it)
-            if (current and f["file_id"] == current) or (not current and self.list.currentRow() < 0
-                                                         and f.get("category_name") == "MAIN"):
+            if current and f["file_id"] == current:
                 self.list.setCurrentItem(it)
+            # by default the newest main file that's made for the game as it is now
+            if f.get("category_name") == "MAIN" and not old and best is None:
+                best = it
+        if self.list.currentRow() < 0 and best is not None:
+            self.list.setCurrentItem(best)
         if self.list.currentRow() < 0 and self.list.count():
             self.list.setCurrentRow(0)
         self.list.itemDoubleClicked.connect(lambda _: self.ok())

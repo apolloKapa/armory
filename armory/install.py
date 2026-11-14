@@ -64,9 +64,14 @@ def stage(store, root, name, meta, fomod_files=None, replace=None, enable=True):
     """put a mod in the store: its id"""
     found = read_meta(root)
     meta = dict(meta)
+    meta.pop("tag_info", None)
+    hint = meta.pop("game_version_hint", None)
     for k, v in found.items():
         if k != "thumb_src" and not meta.get(k):
             meta[k] = v
+    if hint and not meta.get("game_version"):
+        # no manifest that says it: what the Nexus file's name said
+        meta["game_version"] = hint
     files = files_for(root, store.game, name, fomod_files)
     thumb = found.get("thumb_src")
     if thumb:

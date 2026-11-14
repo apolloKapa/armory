@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QFrame, QGraphicsOpacityEffect, 
                              QLineEdit, QListWidget, QListWidgetItem, QMenu, QScrollArea, QStackedWidget,
                              QVBoxLayout, QWidget)
 
-from .. import config, nexus, thunderstore
+from .. import config, gamever, nexus, thunderstore
 from ..config import human
 from . import tasks
 from .theme import Segments, Switch, button, label, menu_button, open_web, tip
@@ -21,6 +21,24 @@ def picture_of(store, m):
         if os.path.isfile(p):
             return p
     return m.get("picture") or None
+
+
+def game_now(store):
+    """the update the game is on, for marking mods made for older ones"""
+    return gamever.current(store.game.id, [gamever.from_manifest(x.get("game_version"))
+                                           for x in store.mods.values()])
+
+
+def game_badge(store, m, now=None):
+    """'1.0' / 'U12.3': which update of the game the mod is made for (red when it's an older one)"""
+    tag = gamever.from_manifest(m.get("game_version"))
+    if not tag:
+        return None
+    now = game_now(store) if now is None else now
+    old = gamever.is_old(tag, now)
+    b = label(tag, "badgeOld" if old else "badgeOk")
+    b.setToolTip(tip(gamever.note(tag, now, store.game.name)))
+    return b
 
 
 def source_badge(m):
@@ -94,8 +112,9 @@ class ModCard(QFrame):
         chips.setSpacing(6)
         if m.get("author"):
             chips.addWidget(label("by " + m["author"], "muted"))
-        if m.get("game_version"):
-            chips.addWidget(label("Game " + m["game_version"], "badgeOk"))
+        gb = game_badge(store, m, page.now)
+        if gb:
+            chips.addWidget(gb)
         chips.addWidget(label(human(m.get("size", 0)), "badge"))
         c = conflicts.get(m["id"])
         if c and m["enabled"]:
@@ -155,6 +174,9 @@ class ModTile(QFrame):
         mid = Qt.AlignmentFlag.AlignVCenter
         if m.get("version"):
             row.addWidget(label("v" + str(m["version"]).lstrip("vV"), "badge"), 0, mid)
+        gb = game_badge(store, m, page.now)
+        if gb:
+            row.addWidget(gb, 0, mid)
         if m.get("update"):
             u = label("Update", "badgeOk")
             u.setToolTip(tip(f"v{m['update'].get('version')} is out: ⋯ → Update"))
@@ -268,6 +290,7 @@ class ModsPage(QWidget):
         super().__init__()
         self.window = window
         self.store = None
+        self.now = ""
         self.tab = "mods"
         self.show_mode = "all"
         self.view = config.get("view") if config.get("view") in ("list", "grid") else "list"
@@ -380,6 +403,7 @@ class ModsPage(QWidget):
         if not self.store:
             return
         mods, tabs, shown = self.visible()
+        self.now = game_now(self.store)
         sb = self.list.verticalScrollBar().value()
         self.list.clear()
         if not shown:

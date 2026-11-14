@@ -12,11 +12,12 @@ from PyQt6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QGrap
                              QInputDialog, QLineEdit, QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea,
                              QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
-from .. import VERSION, config, games, install, layout, mo2, net, nexus, saves, thunderstore, tools, updates
+from .. import VERSION, config, gamever, games, install, layout, mo2, net, nexus, saves, thunderstore, tools, updates
 from ..config import DATA, HOME
 from ..fomod import Fomod
 from ..store import DeployError, Store, resolve_case, staged_files
 from . import motion, tasks
+from .activity import Activity, ActivityCard
 from .browse import BrowsePage
 from .dialogs import (AddGameDialog, CollectionDialog, FomodWizard, ImportProfileDialog, ModDetailsDialog,
                       NexusFilesDialog, SettingsDialog)
@@ -249,6 +250,7 @@ class Window(QMainWindow):
         self.nexus = nexus.Nexus()
         self.dl = Downloads()
         self.dl.finished.connect(self.download_finished)
+        self.activity = Activity()
         self.stores = {}
         self.games = []
         self.game = None
@@ -330,6 +332,17 @@ class Window(QMainWindow):
         v.addWidget(self.stack, 1)
         h.addWidget(self.main, 1)
         self.toast = Toast(self.main)
+        self.activity_card = ActivityCard(self.main, self.activity, lambda: self.show_page("downloads"))
+        self.toast.avoid = self.activity_card
+        self.activity_card.toast = self.toast
+        self.activity.watch(self.dl)
+        # downloads that were going when Armory closed carry on
+        QTimer.singleShot(1500, self.dl.pump)
+        self.busy_timer = QTimer(self)
+        self.busy_timer.setSingleShot(True)
+        self.busy_timer.setInterval(300)
+        self.busy_timer.timeout.connect(self.browse_page.update_busy)
+        self.activity.changed.connect(lambda: self.busy_timer.isActive() or self.busy_timer.start())
         self.overlay = DropOverlay(root)
 
         self.dl_watch = QFileSystemWatcher(self)
@@ -832,9 +845,24 @@ class Window(QMainWindow):
         if not game:
             return
         for p in paths:
-            self.queue.append({"path": p, "meta": dict(meta or {}), "replace": replace, "game": game.id,
-                               "download": download})
+            key = download["id"] if download else f"file:{p}:{time.time():.6f}"
+            m = dict(meta or {})
+            self.queue.append({"path": p, "meta": m, "replace": replace, "game": game.id,
+                               "download": download, "key": key})
+            self.activity.start(key, m.get("name") or layout.mod_name_from_file(p), "Waiting its turn to install",
+                                None, m.get("source"), phase="install", tag=m.get("tag_info"))
         self.next_install()
+
+    def tag_info(self, g, *texts, raw=None):
+        """{tag, tag_old, tag_note} for the activity card: the game update a mod is for (B&S), or None"""
+        if not g or not gamever.supported(g.id):
+            return None
+        tag = gamever.from_manifest(raw) if raw else gamever.from_text(*texts)
+        if not tag:
+            return None
+        from .mods import game_now
+        now = game_now(self.store_for(g))
+        return {"tag": tag, "tag_old": gamever.is_old(tag, now), "tag_note": gamever.note(tag, now, g.name)}
 
     def install_download(self, d):
         meta = dict(d.get("meta") or {})
@@ -847,6 +875,7 @@ class Window(QMainWindow):
     def download_finished(self, d):
         src = (d.get("meta") or {}).get("source") or {}
         if src.get("type") == "nexus" and self.nexus.logged_in and src.get("file_id"):
+            self.activity.update(d["id"], text="Downloaded  ·  checking it with Nexus Mods", value=None)
             self.verify_nexus(d, src)
             return
         self.downloaded(d)
@@ -856,6 +885,7 @@ class Window(QMainWindow):
             self.install_download(d)
         else:
             self.say(f"Downloaded {d['name']}: install it from Downloads")
+            self.activity.finish(d["id"], True, "Downloaded: install it from Downloads")
 
     def verify_nexus(self, d, src):
         """the downloaded file is the Nexus file it should be: Nexus knows every file's checksum"""
@@ -873,11 +903,17 @@ class Window(QMainWindow):
                 return
             why = "It doesn't match any file on Nexus Mods." if not hits else \
                 "It matches a different file on Nexus Mods than the one asked for."
+            if not (d.get("install", True) and config.get("auto_install", True)):
+                self.say(f"{d['name']} doesn't check out with Nexus: {why}")
+                self.activity.finish(d["id"], False, f"Downloaded, but it doesn't check out: {why}")
+                return
             if QMessageBox.warning(self, "Download didn't check out",
                                    f"{d['name']}: {why} It may be damaged or not what Nexus sent. Install it anyway?",
                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                                    QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
                 self.downloaded(d)
+            else:
+                self.activity.finish(d["id"], False, f"Not installed: {why}")
 
         def fail(msg):
             self.say(f"Couldn't check {d['name']} with Nexus ({msg}); installing it anyway")
@@ -897,22 +933,28 @@ class Window(QMainWindow):
         self.installing = True
         src = job["path"]
         name = job["meta"].get("name") or layout.mod_name_from_file(src)
-        self.say(f"Installing {name}...")
+        akey = job.get("key") or src
+        act = self.activity
+        act.start(akey, name, "Unpacking" if layout.is_archive(src) else "Reading its files", None,
+                  job["meta"].get("source"), phase="install")
         os.makedirs(os.path.join(DATA, "tmp"), exist_ok=True)
         tmp = tempfile.mkdtemp(prefix="install-", dir=os.path.join(DATA, "tmp"))
 
-        def cleanup():
+        def cleanup(why=None):
             shutil.rmtree(tmp, ignore_errors=True)
             self.installing = False
+            if why:
+                act.finish(akey, text=why, state="off")
             QTimer.singleShot(0, self.next_install)
 
         def fail(msg):
             cleanup()
+            act.finish(akey, False, f"Couldn't install it: {msg}")
             QMessageBox.warning(self, f"Couldn't install {name}", msg)
 
         def unpacked(root):
             if config.get("scan_mods", False):
-                self.say(f"Scanning {name} with ClamAV...")
+                act.update(akey, text="Scanning it with ClamAV")
                 tasks.run(lambda: layout.scan(root), lambda found: scanned(root, found),
                           lambda msg: scan_failed(root, msg))
                 return
@@ -921,6 +963,7 @@ class Window(QMainWindow):
         def scanned(root, found):
             if found:
                 cleanup()
+                act.finish(akey, False, "Not installed: ClamAV found something in it")
                 QMessageBox.critical(self, f"{name} wasn't installed",
                                      "ClamAV found something in it:\n\n" +
                                      "\n".join(f"{f}: {what}" for f, what in found[:10]))
@@ -932,7 +975,7 @@ class Window(QMainWindow):
                     == QMessageBox.StandardButton.Yes:
                 go_on(root)
             else:
-                cleanup()
+                cleanup("Not installed (not scanned)")
 
         def go_on(root):
             fomod_files = None
@@ -948,9 +991,10 @@ class Window(QMainWindow):
                     for mid in st.profile["enabled"]:
                         for key in staged_files(st.mod_path(mid)):
                             installed.add(key.split("/")[-1])
+                    act.update(akey, text="Waiting for you: pick its options")
                     wiz = FomodWizard(self, fm, installed)
                     if not wiz.exec() or not wiz.files:
-                        cleanup()
+                        cleanup("Not installed")
                         self.say(f"{name} wasn't installed")
                         return
                     fomod_files = [(s, d) for s, d in wiz.files]
@@ -962,9 +1006,10 @@ class Window(QMainWindow):
             if replace is None:
                 replace = self.ask_replace(st, meta, name)
                 if replace is False:
-                    cleanup()
+                    cleanup("Not installed")
                     return
             enable = not meta.pop("disabled", False)
+            act.update(akey, text="Installing  ·  laying out its files", value=None)
             tasks.run(lambda: install.stage(st, root, name, meta, fomod_files, replace, enable), staged, fail)
 
         def staged(mid):
@@ -976,7 +1021,15 @@ class Window(QMainWindow):
                 self.dl.add_local(src, g.id, {"name": st.mods[mid].get("name"), "source": st.mods[mid].get("source")})
                 self.dl.mark_installed(src)
             m = st.mods[mid]
-            self.say(f"Installed {m.get('name')}")
+            info = self.tag_info(g, raw=m.get("game_version"))
+            text = "Installed" + (f"  ·  for {g.name} {info['tag']}" if info else "")
+            if info and info["tag_old"]:
+                text = f"Installed, but it's made for {info['tag']}: it may not work on the game as it is now"
+                self.say(f"{m.get('name')} is made for {info['tag']}, an older update of {g.name}")
+            else:
+                self.say(f"Installed {m.get('name')}")
+            act.update(akey, name=m.get("name") or name, **(info or {}))
+            act.finish(akey, True, text)
             if g is self.game:
                 self.changed()
             else:
@@ -1073,7 +1126,9 @@ class Window(QMainWindow):
             QMessageBox.information(self, "No files", "That mod has no files to download.")
             return
         title = (raw or {}).get("name") or f"Mod {mod_id}"
-        dlg = NexusFilesDialog(self, title, files, current)
+        from .mods import game_now
+        dlg = NexusFilesDialog(self, title, files, current, g, game_now(self.store_for(g))
+                               if gamever.supported(g.id) else "")
         if not dlg.exec() or not dlg.choice:
             return
         f = dlg.choice
@@ -1083,6 +1138,11 @@ class Window(QMainWindow):
         """ask Nexus for the download, with the mod's details, and queue it
         known: {"info": mod details, "file": file details} already at hand (saves two requests)"""
         nx = self.nexus
+        lk = f"nx-{mod_id}-{file_id}-{time.time():.6f}"
+        guess = (known or {}).get("info", {}).get("name") or next(
+            (t.item["name"] for t in getattr(self.browse_page, "tiles", []) if t.item["id"] == mod_id), "")
+        self.activity.start(lk, guess or f"Nexus mod {mod_id}", "Asking Nexus Mods for the download", None,
+                            {"type": "nexus", "mod_id": mod_id}, phase="link")
 
         def work():
             if known:
@@ -1097,6 +1157,7 @@ class Window(QMainWindow):
         def done(res):
             info, f, urls = res
             if not urls:
+                self.activity.finish(lk, False, "Nexus didn't give a download link")
                 QMessageBox.warning(self, "Nexus Mods", "Nexus didn't give a download link.")
                 return
             meta = {"name": info.get("name"), "version": f.get("version") or info.get("version"),
@@ -1108,13 +1169,22 @@ class Window(QMainWindow):
                 meta["name"] = f"{info.get('name')} — {f.get('name')}"
             if replace:
                 meta["replace"] = replace
+            info_tag = self.tag_info(g, f.get("name"), f.get("file_name"), f.get("description"), info.get("name"))
+            if info_tag:
+                meta["tag_info"] = info_tag
+                meta["game_version_hint"] = info_tag["tag"]
             filename = f.get("file_name") or f"{mod_id}-{file_id}.zip"
-            self.dl.add(urls[0]["URI"], filename, g.id, {k: v for k, v in meta.items() if v is not None})
-            self.say(f"Downloading {meta['name']}")
-            if self.game is g and self.page == "browse":
-                pass
+            d = self.dl.add(urls[0]["URI"], filename, g.id, {k: v for k, v in meta.items() if v is not None})
+            self.activity.drop(lk)
+            if d.get("dupe"):
+                self.say(f"{meta['name']} is already downloading")
+            elif info_tag and info_tag["tag_old"]:
+                self.say(f"Downloading {meta['name']}: it's made for {info_tag['tag']}, an older update")
+            else:
+                self.say(f"Downloading {meta['name']}")
 
         def fail(msg):
+            self.activity.finish(lk, False, msg)
             if "403" in msg and not key:
                 msg += "\n\nOnly Premium accounts can download without the website's Mod Manager Download button."
             QMessageBox.warning(self, "Nexus Mods", msg)
@@ -1193,6 +1263,9 @@ class Window(QMainWindow):
                 have[s.get("full_name", "").lower()] = m.get("version", "")
         if replace_all:
             have.pop(full.lower(), None)
+        lk = f"ts-{full}-{time.time():.6f}"
+        self.activity.start(lk, full.partition("-")[2].replace("_", " ") or full, "Looking up what it needs", None,
+                            {"type": "thunderstore", "full_name": full}, phase="link")
 
         def work():
             pk = packages or thunderstore.listing(g.thunderstore)
@@ -1204,6 +1277,7 @@ class Window(QMainWindow):
             return todo
 
         def done(todo):
+            self.activity.drop(lk)
             if not todo:
                 self.say("Already installed and up to date")
                 return
@@ -1219,7 +1293,11 @@ class Window(QMainWindow):
             names = ", ".join(p["name"] for p in todo)
             self.say(f"Downloading {names}" if len(todo) < 5 else f"Downloading {len(todo)} packages")
 
-        tasks.run(work, done, lambda m: QMessageBox.warning(self, "Thunderstore", m))
+        def fail(m):
+            self.activity.finish(lk, False, m)
+            QMessageBox.warning(self, "Thunderstore", m)
+
+        tasks.run(work, done, fail)
 
     def handle_ror2mm(self, url):
         link = thunderstore.parse_link(url)
@@ -2131,10 +2209,23 @@ class Window(QMainWindow):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self.overlay.setGeometry(self.centralWidget().rect())
+        if self.activity_card.isVisible():
+            self.activity_card.place()
         if self.toast.isVisible():
             self.toast.place()
 
     def closeEvent(self, e):
+        n_dl = self.dl.running() + sum(1 for d in self.dl.items if d["status"] == "queued")
+        n_in = int(self.installing) + len(self.queue)
+        if n_dl or n_in:
+            what = " and ".join(x for x in (f"{n_dl} download{'s' * (n_dl != 1)}" if n_dl else "",
+                                            f"{n_in} install{'s' * (n_in != 1)}" if n_in else "") if x)
+            if QMessageBox.question(self, "Still working", f"Armory is in the middle of {what}. Quit anyway? "
+                                    "Downloads carry on from where they stopped the next time you open Armory.",
+                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                    QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                e.ignore()
+                return
         config.save_conf(window_size=[self.width(), self.height()])
         super().closeEvent(e)
 

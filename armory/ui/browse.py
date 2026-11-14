@@ -5,7 +5,7 @@ from PyQt6.QtGui import QFontMetrics
 from PyQt6.QtWidgets import (QComboBox, QFrame, QGridLayout, QHBoxLayout, QLineEdit, QScrollArea, QVBoxLayout,
                              QWidget)
 
-from .. import config, nexus, thunderstore
+from .. import config, gamever, nexus, thunderstore
 from ..config import short_count
 from . import tasks
 from .theme import Segments, button, label, open_web, tip
@@ -75,6 +75,14 @@ class ResultTile(QFrame):
         stats.addWidget(label(f"↓ {short_count(item['downloads'])}", "badge"))
         if item.get("likes") is not None:
             stats.addWidget(label(f"♥ {short_count(item['likes'])}", "badge"))
+        g = page.game
+        tag = gamever.from_text(item["name"], item.get("summary")) if g and gamever.supported(g.id) else ""
+        if tag:
+            now = page.now()
+            gb = label(tag, "badgeOld" if gamever.is_old(tag, now) else "badgeOk")
+            gb.setToolTip(tip(gamever.note(tag, now, g.name) + "\n(from its name or summary: each file shows its "
+                                                               "own when you pick one)"))
+            stats.addWidget(gb)
         if item.get("adult"):
             stats.addWidget(label("NSFW", "badgeNsfw"))
         stats.addStretch(1)
@@ -92,9 +100,21 @@ class ResultTile(QFrame):
             if page.source == "nexus" and not page.window.nexus.premium:
                 b.setToolTip("Opens the mod's Files tab: press “Mod Manager Download” there and Armory installs it")
         row.addWidget(b, 1)
+        self.item, self.btn, self.btn_text = item, b, b.text()
+        self.btn_on = b.isEnabled()
         row.addWidget(button("Page", lambda: open_web(item["url"]), tip="Open its page in your browser"))
         lay.addLayout(row)
         self.setFixedHeight(self.sizeHint().height())
+        self.set_busy(page.window.activity.busy_text(page.source, item["id"]))
+
+    def set_busy(self, text):
+        """'Downloading 40%' / 'Installing...' on the button while the mod is on its way in"""
+        if text:
+            self.btn.setText(text)
+            self.btn.setEnabled(False)
+        else:
+            self.btn.setText(self.btn_text)
+            self.btn.setEnabled(self.btn_on)
 
 
 class BrowsePage(QWidget):
@@ -283,9 +303,11 @@ class BrowsePage(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         grid = QGridLayout()
         grid.setSpacing(10)
+        self.tiles = []
         for i, item in enumerate(self.results):
-            grid.addWidget(ResultTile(self, item, tw), i // self.cols, i % self.cols,
-                           Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+            t = ResultTile(self, item, tw)
+            self.tiles.append(t)
+            grid.addWidget(t, i // self.cols, i % self.cols, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         grid.setColumnStretch(self.cols, 1)
         outer.addLayout(grid)
         if self.total > len(self.results):
@@ -303,6 +325,21 @@ class BrowsePage(QWidget):
             self.window.nexus_install(self.game, item["id"], item["raw"])
         else:
             self.window.thunderstore_install(self.game, item["id"], self.ts_packages)
+
+    def now(self):
+        st = self.window.store
+        if st and st.game is self.game:
+            from .mods import game_now
+            return game_now(st)
+        return gamever.current(self.game.id) if self.game else ""
+
+    def update_busy(self):
+        """the activity changed: buttons of mods that are downloading or installing say so"""
+        for t in list(getattr(self, "tiles", [])):
+            try:
+                t.set_busy(self.window.activity.busy_text(self.source, t.item["id"]))
+            except RuntimeError:
+                pass
 
     def refresh_tiles(self):
         if self.results:

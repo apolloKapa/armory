@@ -1,6 +1,7 @@
 """HTTP with the standard library: JSON requests, downloads with progress, and an image cache."""
 import gzip
 import hashlib
+import http.client
 import json
 import os
 import urllib.error
@@ -150,28 +151,55 @@ def quote_url(url):
                                     urllib.parse.quote(p.fragment, safe=keep + "?")))
 
 
-def download(url, dest, progress=None, cancelled=lambda: False, headers=None):
-    """download to dest (through dest.part); progress(done, total) every chunk"""
+def download(url, dest, progress=None, cancelled=lambda: False, headers=None, resume=False):
+    """download to dest (through dest.part); progress(done, total) every chunk.
+    resume: a .part left by a download that stopped (Armory closed, the connection dropped) carries on
+    from where it got to, and a failed download keeps its .part for that"""
     url = check_url(url)
     h = {"User-Agent": UA}
     h.update(headers or {})
     part = dest + ".part"
     os.makedirs(os.path.dirname(dest), exist_ok=True)
+    have = os.path.getsize(part) if resume and os.path.isfile(part) else 0
+    if have:
+        h["Range"] = f"bytes={have}-"
     req = urllib.request.Request(url, headers=h)
+    keep = False
     try:
-        with opener().open(req, timeout=60) as r, open(part, "wb") as f:
+        try:
+            r = opener().open(req, timeout=60)
+        except urllib.error.HTTPError as e:
+            if e.code != 416 or not have:
+                raise
+            # the .part is no good for this file: start over
+            os.unlink(part)
+            return download(url, dest, progress, cancelled, headers, resume)
+        with r:
+            more = r.status == 206 and have
+            if not more:
+                have = 0
             total = int(r.headers.get("Content-Length") or 0)
-            done = 0
-            while True:
-                if cancelled():
-                    raise NetError("Cancelled")
-                chunk = r.read(1 << 17)
-                if not chunk:
-                    break
-                f.write(chunk)
-                done += len(chunk)
-                if progress:
-                    progress(done, total)
+            if total:
+                total += have
+            done = have
+            with open(part, "ab" if more else "wb") as f:
+                while True:
+                    if cancelled():
+                        raise NetError("Cancelled")
+                    try:
+                        chunk = r.read(1 << 17)
+                    except (OSError, http.client.HTTPException) as e:
+                        keep = resume and done > 0
+                        raise NetError(f"Download failed ({e})") from None
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    done += len(chunk)
+                    if progress:
+                        progress(done, total)
+            if total and done < total:
+                keep = resume
+                raise NetError(f"Download stopped early ({done} of {total} bytes)")
         os.replace(part, dest)
         return dest
     except urllib.error.HTTPError as e:
@@ -181,7 +209,7 @@ def download(url, dest, progress=None, cancelled=lambda: False, headers=None):
             raise
         raise NetError(f"Download failed ({getattr(e, 'reason', e)})") from None
     finally:
-        if os.path.exists(part):
+        if os.path.exists(part) and not keep:
             try:
                 os.unlink(part)
             except OSError:

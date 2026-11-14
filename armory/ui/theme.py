@@ -193,6 +193,17 @@ QWidget#hero QComboBox#glass {{ background: rgba(20,20,26,0.45); color: #f2f2f6;
 QWidget#hero QToolButton {{ color: #f2f2f6; }}
 QWidget#hero QToolButton#glass {{ background: rgba(20,20,26,0.45); border: 1px solid rgba(255,255,255,0.14); }}
 QLabel#toastDot {{ background: {ACCENT}; border-radius: 4px; }}
+QFrame#activity {{ background: {POPUP}; border: 1px solid rgba({FG},0.1); border-radius: 14px; }}
+QFrame#activityRow {{ background: transparent; border: none; border-top: 1px solid rgba({FG},0.06); }}
+QLabel#actTitle {{ color: {SOFT}; font-size: 12px; font-weight: 700; }}
+QLabel#actName {{ font-weight: 600; font-size: 13px; }}
+QLabel#actInfo {{ color: {DIM}; font-size: 11px; }}
+QLabel#actOk {{ color: {GOOD}; font-size: 11px; font-weight: 600; }}
+QLabel#actBad {{ color: {BAD}; font-size: 11px; font-weight: 600; }}
+QProgressBar#actBar {{ border-radius: 2px; }}
+QProgressBar#actBar::chunk {{ border-radius: 2px; }}
+QToolButton#actStop {{ background: transparent; border: none; color: {DIM}; padding: 0 4px; font-size: 12px; }}
+QToolButton#actStop:hover {{ color: {TEXT}; }}
 QFrame#hline {{ background: rgba({FG},0.07); border: none; }}
 QLabel#grip {{ color: {DIM}; font-size: 16px; }}
 QLabel#modName {{ font-size: 14px; font-weight: 700; color: {TEXT}; }}
@@ -578,9 +589,14 @@ class Toast(QFrame):
     def place(self):
         p = self.parentWidget()
         if p:
-            w = min(self.sizeHint().width(), p.width() - 40)
+            room = p.width()
+            card = getattr(self, "avoid", None)
+            if card is not None and card.isVisible() and card.x() < (p.width() + self.sizeHint().width()) // 2:
+                # the activity card is in the corner: centre in what's left of the bottom
+                room = card.x() - 12
+            w = min(self.sizeHint().width(), room - 40)
             self.resize(w, self.sizeHint().height())
-            self.move((p.width() - w) // 2, p.height() - self.height() - 22)
+            self.move(max(20, (room - w) // 2), p.height() - self.height() - 22)
 
 
 def blurred(pix, w, h):

@@ -16,6 +16,12 @@ LIST = os.path.join(DATA, "downloads.json")
 MAX_RUNNING = 3
 
 
+def link_expired(url):
+    """Nexus download links say when they stop working (expires=<unix time>)"""
+    m = re.search(r"[?&]expires=(\d+)", url or "")
+    return bool(m) and int(m.group(1)) < time.time() + 30
+
+
 def safe_name(name):
     return re.sub(r'[\\/:*?"<>|\x00]+', "_", name).strip() or "download"
 
@@ -30,8 +36,12 @@ class Downloads(QObject):
         self.items = read_json(LIST, [])
         for d in self.items:
             if d.get("status") in ("downloading", "queued"):
-                d["status"] = "failed"
-                d["error"] = "Stopped when Armory closed"
+                # Armory was closed halfway: carry on (from where it stopped) unless the link ran out
+                if d.get("url") and not link_expired(d["url"]):
+                    d["status"] = "queued"
+                else:
+                    d["status"] = "failed"
+                    d["error"] = "Stopped when Armory closed, and the link has run out: download it again"
         self.cancel_flags = {}
 
     def save(self):
@@ -41,6 +51,11 @@ class Downloads(QObject):
         return next((d for d in self.items if d["id"] == did), None)
 
     def add(self, url, filename, game, meta, headers=None, install=True):
+        same = next((d for d in self.items if d["status"] in ("queued", "downloading") and d["game"] == game
+                     and d["url"].split("?")[0] == url.split("?")[0]), None)
+        if same:
+            # pressed twice: one download is enough
+            return dict(same, dupe=True)
         filename = safe_name(filename or os.path.basename(url.split("?")[0]) or "mod.zip")
         folder = os.path.join(DOWNLOADS, game)
         path = os.path.join(folder, filename)
@@ -52,6 +67,11 @@ class Downloads(QObject):
                                           for d in self.items):
             path = os.path.join(folder, f"{base} ({n}){ext}")
             n += 1
+        try:
+            # a piece left over from something else: not this download's
+            os.unlink(path + ".part")
+        except OSError:
+            pass
         d = {"id": f"{time.time():.6f}", "name": meta.get("name") or base, "file": path, "url": url, "game": game,
              "meta": meta, "status": "queued", "done": 0, "total": 0, "error": "", "time": time.time(),
              "install": install, "headers": headers or {}}
@@ -87,7 +107,9 @@ class Downloads(QObject):
         self.cancel_flags[d["id"]] = flag
 
         def work(progress):
-            return net.download(d["url"], d["file"], progress, lambda: flag["stop"], d.get("headers"))
+            if link_expired(d["url"]):
+                raise net.NetError("The download link has run out: download it again from the mod's page")
+            return net.download(d["url"], d["file"], progress, lambda: flag["stop"], d.get("headers"), resume=True)
 
         def prog(done, total):
             d["done"], d["total"] = done, total
