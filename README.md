@@ -120,6 +120,12 @@ The first time you open Blade & Sorcery, the mods in its Mods folder (and the on
 off or on another page come in turned off. Instead of the 1.0 / U12 / U11 pages, use profiles: make
 one per game version (Profile ⋯ → New profile) and switch between them.
 
+## Made with AI
+
+Part of Armory was made with AI: [Claude](https://claude.com/claude-code) (Anthropic's AI) helped
+write and test its code, and is listed as a contributor. Every change was asked for, tried out and
+released by the author.
+
 ## License
 
 MIT. Armory is written from scratch; it doesn't contain code from other mod managers.
