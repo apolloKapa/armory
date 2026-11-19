@@ -342,6 +342,27 @@ class Game:
         return bool(self.path and os.path.isdir(self.path))
 
     @property
+    def external(self):
+        """not Steam's copy of the game: one you added yourself, or a folder outside Steam's
+        libraries (a GOG or other copy). Play never goes through Steam for these: Steam would start
+        its own copy, or offer to install one, and never the folder the mods went into"""
+        if not self.found:
+            return False
+        if not self.appid or no_steam(self.id):
+            return True
+        real = os.path.realpath(self.path)
+        for lib in steam_libraries():
+            common = os.path.realpath(os.path.join(lib, "steamapps", "common"))
+            if real.startswith(common + os.sep):
+                return False
+        return True
+
+    @property
+    def launch_command(self):
+        """the command Play runs, if you gave one (a game you added, or set from the game menu)"""
+        return (get("launch_cmds", {}) or {}).get(self.id, "") or self.launch
+
+    @property
     def prefix(self):
         """the Proton prefix's drive_c, or None (native games, or never run)"""
         if self.spec.get("prefix"):
@@ -434,6 +455,26 @@ def detect():
             out.append(g)
     out.sort(key=lambda g: g.name.lower())
     return out
+
+
+def no_steam(gid):
+    """marked "No Steam id": your own copy of a game Armory knows, never started through Steam
+    wherever its folder is"""
+    return gid in (get("no_steam", []) or [])
+
+
+def set_no_steam(gid, on):
+    ids = [g for g in get("no_steam", []) or [] if g != gid]
+    save_conf(no_steam=ids + [gid] if on else ids)
+
+
+def set_launch_command(gid, cmd):
+    d = dict(get("launch_cmds", {}) or {})
+    if cmd:
+        d[gid] = cmd
+    else:
+        d.pop(gid, None)
+    save_conf(launch_cmds=d)
 
 
 def set_game_dir(gid, path):

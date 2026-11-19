@@ -4,11 +4,13 @@ and starting the game through one of them instead of Steam.
 Windows programs run with the Proton the game uses in Steam (its compatibility setting, else your
 default, else the newest installed), with the game's own prefix, the way Steam runs them.
 """
+import json
 import os
 import re
+import shutil
 import subprocess
 
-from . import config, games
+from . import config, games, proton as protons
 
 
 def tools(game):
@@ -19,6 +21,106 @@ def save_tools(game, items):
     all_ = dict(config.get("tools", {}) or {})
     all_[game.id] = items
     config.save_conf(tools=all_)
+
+
+# ---- starting a game that isn't Steam's ----------------------------------------------------------
+
+NOT_THE_GAME = ("unins", "crash", "report", "redist", "setup", "install", "vc_", "dxsetup", "dotnet", "helper",
+                "updater", "launcher_helper", "cleanup", "config", "settings", "benchmark")
+
+
+def main_exe(game):
+    """the program that is the game, in its folder: the one Armory knows it by, else the biggest
+    .exe that isn't an installer or a helper, else a native program named like the folder"""
+    try:
+        names = os.listdir(game.path)
+    except OSError:
+        return None
+    proof = (game.spec.get("proof") or "").lower()
+    for n in names:
+        if proof and n.lower() == proof and os.path.isfile(os.path.join(game.path, n)):
+            return os.path.join(game.path, n)
+    exes = [os.path.join(game.path, n) for n in names
+            if n.lower().endswith(".exe") and not any(w in n.lower() for w in NOT_THE_GAME)]
+    exes = [p for p in exes if os.path.isfile(p)]
+    if exes:
+        return max(exes, key=os.path.getsize)
+    base = os.path.basename(os.path.normpath(game.path)).lower().replace(" ", "")
+    for n in sorted(names):
+        p = os.path.join(game.path, n)
+        stem = os.path.splitext(n)[0].lower().replace(" ", "")
+        if os.path.isfile(p) and os.access(p, os.X_OK) and (stem == base or n.lower().endswith((".x86_64", ".sh"))):
+            return p
+    return None
+
+
+def hangar_command():
+    """how to start Hangar (the non-Steam launcher), or None"""
+    p = shutil.which("hangar")
+    if p:
+        return [p]
+    for d in (os.path.join(config.HOME, "Appimages"), os.path.join(config.HOME, "Applications"),
+              os.path.join(config.HOME, ".local", "bin")):
+        try:
+            for n in sorted(os.listdir(d)):
+                if n.lower().startswith("hangar") and os.access(os.path.join(d, n), os.X_OK):
+                    return [os.path.join(d, n)]
+        except OSError:
+            pass
+    return None
+
+
+def hangar_entry(game):
+    """the id of Hangar's entry for this game (its program is in the game's folder), or None"""
+    try:
+        lib = json.load(open(os.path.join(config.HOME, ".config", "hangar", "library.json"), encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    root = os.path.realpath(game.path) + os.sep
+    for e in lib if isinstance(lib, list) else []:
+        exe = e.get("exe") if isinstance(e, dict) else None
+        if exe and os.path.realpath(exe).startswith(root) and e.get("id"):
+            return e["id"]
+    return None
+
+
+def start_external(game):
+    """start a game that isn't Steam's copy, never through Steam: (the process, how it was started).
+    Your own command; else Hangar (its entry for the game, with the prefix and runner set there, or
+    the game's program run by it); else the program itself (a native one), umu-run or Wine in a
+    prefix of Armory's. Nothing to start it with: an OSError that says what to do"""
+    env = config.clean_env()
+    quiet = dict(start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if game.launch_command:
+        return subprocess.Popen(game.launch_command, shell=True, cwd=game.path, env=env, **quiet), "your command"
+    hangar = hangar_command()
+    if hangar:
+        eid = hangar_entry(game)
+        if eid:
+            return subprocess.Popen(hangar + ["--launch", eid], env=env, **quiet), "Hangar"
+    exe = main_exe(game)
+    if not exe:
+        raise OSError(f"Armory couldn't tell which program in {game.path} is the game, and it doesn't start "
+                      "games outside Steam's libraries through Steam. Set how it starts: the game menu, "
+                      "\"How Play starts it...\"")
+    if not exe.lower().endswith(".exe"):
+        return subprocess.Popen([exe], cwd=game.path, env=env, **quiet), "its own program"
+    if hangar:
+        return subprocess.Popen(hangar + ["--run", exe], env=env, **quiet), "Hangar"
+    prefix = os.path.join(config.HOME, ".local", "share", "armory", "prefixes", game.id)
+    runner = shutil.which("umu-run") or shutil.which("wine")
+    if not runner:
+        raise OSError("This copy of the game isn't Steam's, so Armory doesn't start it through Steam, and there's "
+                      "no Hangar, umu-run or Wine to run it with. Install one, or set a command: the game "
+                      "menu, \"How Play starts it...\"")
+    os.makedirs(prefix, exist_ok=True)
+    env["WINEPREFIX"] = prefix
+    if os.path.basename(runner) == "umu-run":
+        env.setdefault("GAMEID", f"umu-{game.appid}" if game.appid else "0")
+        picked = protons.folder_for(game)       # (the Proton picked for the game; else umu's own choice)
+        if picked:
+            env["PROTONPATH"] = picked
+    return subprocess.Popen([runner, exe], cwd=game.path, env=env, **quiet), os.path.basename(runner)
 
 
 def play_with(game):
@@ -55,8 +157,13 @@ def _compat_tool(appid):
     return names.get(str(appid)) or names.get("0") or ""
 
 
-def proton_for(appid):
-    """the proton script to run a game's tools with, or None"""
+def proton_for(appid, game=None):
+    """the proton script to run a game's tools with, or None: the version picked for the game
+    (armory/proton.py), else what Steam uses for it"""
+    if game is not None:
+        picked = protons.script_for(game)
+        if picked:
+            return picked
     root = games.steam_root()
     if not root:
         return None
@@ -110,7 +217,7 @@ def run(game, tool):
     if exe.lower().endswith((".exe", ".bat", ".msi")):
         if not game.appid:
             raise OSError("Windows tools need a Steam game (its Proton prefix)")
-        proton = proton_for(game.appid)
+        proton = proton_for(game.appid, game)
         if not proton:
             raise OSError("No Proton found: install one in Steam")
         lib = game.library or (games.steam_install(game.appid)[0])

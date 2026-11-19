@@ -138,8 +138,14 @@ def main(argv):
         return 0
     if cmd == "play":
         report(st.deploy())
-        if g.launch:
-            subprocess.Popen(g.launch, shell=True, cwd=g.path, start_new_session=True, env=config.clean_env())
+        if g.external:
+            from . import tools
+            try:
+                tools.start_external(g)
+            except OSError as e:
+                raise SystemExit(f"armory: {e}")
+        elif g.launch_command:
+            subprocess.Popen(g.launch_command, shell=True, cwd=g.path, start_new_session=True, env=config.clean_env())
         elif g.appid:
             subprocess.Popen(["xdg-open", f"steam://rungameid/{g.appid}"], start_new_session=True,
                              env=config.clean_env())

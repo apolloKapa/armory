@@ -19,7 +19,7 @@ from ..store import DeployError, Store, resolve_case, staged_files
 from . import motion, tasks
 from .activity import Activity, ActivityCard
 from .browse import BrowsePage
-from .dialogs import (AddGameDialog, CollectionDialog, FomodWizard, ImportProfileDialog, ModDetailsDialog,
+from .dialogs import (AddGameDialog, CollectionDialog, FomodWizard, ImportProfileDialog, ModDetailsDialog, ProtonDialog,
                       NexusFilesDialog, SettingsDialog)
 from .downloads import Downloads, DownloadsPage
 from .mods import ModsPage, PluginsPage, missing_requirements, requirement_line
@@ -1536,15 +1536,37 @@ class Window(QMainWindow):
                 tools.run(g, tool)
                 self.say(f"Starting {g.name} with {tool['name']}...")
                 return
-            if g.launch:
-                subprocess.Popen(g.launch, shell=True, cwd=g.path, start_new_session=True, env=config.clean_env(),
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if g.external:
+                # not Steam's copy: never through Steam (it would start its own copy, or offer to install one)
+                _, how = tools.start_external(g)
+                self.say(f"Starting {g.name} with {how}...")
+                return
+            if g.launch_command:
+                subprocess.Popen(g.launch_command, shell=True, cwd=g.path, start_new_session=True,
+                                 env=config.clean_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            elif not g.appid:
+                raise OSError("There's nothing to start this game with. Set how it starts: the game menu, "
+                              "\"How Play starts it...\"")
             else:
                 subprocess.Popen(["xdg-open", f"steam://rungameid/{g.appid}"], start_new_session=True,
                                  env=config.clean_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.say(f"Starting {g.name}...")
         except OSError as e:
             QMessageBox.warning(self, "Couldn't start it", str(e))
+
+    def set_launch_command(self):
+        g = self.game
+        if not g:
+            return
+        how = ("This copy isn't Steam's, so Play never goes through Steam: it uses this command, else Hangar, "
+               "else the game's own program." if g.external else
+               "Steam starts this game unless you give a command here.")
+        cmd, ok = QInputDialog.getText(self, "How Play starts it",
+                                       f"{how}\n\nA command to start {g.name} (run in its folder; empty: the default):",
+                                       text=(config.get("launch_cmds", {}) or {}).get(g.id, "") or g.launch)
+        if ok:
+            games.set_launch_command(g.id, cmd.strip())
+            self.say("Play uses your command" if cmd.strip() else "Play starts the game the default way")
 
     def fill_game_menu(self):
         m = self.game_menu
@@ -1590,7 +1612,7 @@ class Window(QMainWindow):
         if tools.tools(g):
             tm.addSeparator()
             pw = tm.addMenu("Play starts the game with")
-            a = pw.addAction("Steam" if g.appid else "Its launch command")
+            a = pw.addAction("Steam" if g.appid and not g.external else "Its own launcher (never Steam)")
             a.setCheckable(True)
             a.setChecked(not current)
             a.triggered.connect(lambda: (tools.set_play_with(g, ""), self.say("Play starts the game normally")))
@@ -1604,6 +1626,15 @@ class Window(QMainWindow):
             for t in tools.tools(g):
                 rm.addAction(t["name"], lambda t=t: self.remove_tool(t))
         tm.addAction("Add a tool...", self.add_tool)
+        if g.appid:
+            ns = m.addAction("No Steam id (never start it through Steam)")
+            ns.setCheckable(True)
+            ns.setChecked(games.no_steam(g.id))
+            ns.toggled.connect(lambda on: (games.set_no_steam(g.id, on),
+                                           self.say(f"Play never starts {g.name} through Steam" if on else
+                                                    f"{g.name} is started the usual way again")))
+        m.addAction("How Play starts it...", self.set_launch_command)
+        m.addAction("Proton version...", lambda: ProtonDialog(self, g).exec())
         if g.layout.get("data") or g.plugins:
             m.addAction("Import from Mod Organizer 2...", self.import_mo2)
         if g.nexus:
@@ -2175,6 +2206,7 @@ class Window(QMainWindow):
     def add_game(self):
         dlg = AddGameDialog(self, [g.id for g in self.games])
         if dlg.exec() and dlg.result_id:
+            self.stores.pop(dlg.result_id, None)     # (a game already listed, given a folder of your own)
             self.load_games(dlg.result_id)
 
     def retheme(self):

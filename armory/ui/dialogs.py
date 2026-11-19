@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QFileD
                              QScrollArea, QSpinBox, QStackedWidget, QTextBrowser, QTreeWidget, QTreeWidgetItem,
                              QVBoxLayout, QWidget)
 
-from .. import config, gamever, games, links, nexus, oauth
+from .. import config, gamever, games, links, nexus, oauth, proton
 from ..config import human
 from . import tasks, theme
 from .theme import Segments, button, label, rounded
@@ -472,6 +472,105 @@ class CollectionDialog(QDialog):
                 if self.list.item(i).checkState() == Qt.CheckState.Checked]
 
 
+class ProtonDialog(QDialog):
+    """which Proton a game's Windows programs run with (Default, or one of the versions on this PC),
+    and looking for a newer GE-Proton"""
+    def __init__(self, parent, game):
+        super().__init__(parent)
+        self.game = game
+        self.setWindowTitle("Proton version")
+        self.setMinimumWidth(520)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(22, 20, 22, 18)
+        v.setSpacing(10)
+        v.addWidget(label(f"Proton for {game.name}", "title"))
+        what = ("Used when Armory starts this game itself (it isn't Steam's copy) and for the tools you add to it."
+                if game.external else
+                "Used for the tools you add to this game (script extenders, mod tools). Steam starts the game "
+                "itself with the version set in Steam: Properties, Compatibility.")
+        v.addWidget(label(what + " Default: what Steam uses for the game, else the newest on this PC.", "muted", True))
+        self.list = QListWidget()
+        self.list.setMinimumHeight(220)
+        self.list.currentItemChanged.connect(self.picked)
+        v.addWidget(self.list)
+        self.note = label("", "small", True)
+        v.addWidget(self.note)
+        r = QHBoxLayout()
+        self.check_btn = button("Check for updates", self.check, tip="Look for a newer GE-Proton")
+        r.addWidget(self.check_btn)
+        r.addStretch(1)
+        r.addWidget(button("Done", self.accept, "primary"))
+        v.addLayout(r)
+        self.filling = False
+        self.fill()
+
+    def fill(self):
+        self.filling = True
+        self.list.clear()
+        cur = proton.choice(self.game)
+        it = QListWidgetItem("Default")
+        it.setData(Qt.ItemDataRole.UserRole, "")
+        self.list.addItem(it)
+        self.list.setCurrentItem(it)
+        found = False
+        for e in proton.installed():
+            it = QListWidgetItem(e["name"])
+            it.setData(Qt.ItemDataRole.UserRole, e["name"])
+            self.list.addItem(it)
+            if e["name"] == cur:
+                self.list.setCurrentItem(it)
+                found = True
+        if cur and not found:
+            self.note.setText(f"{cur} was picked but isn't on this PC any more, so Default is used.")
+        elif self.list.count() == 1:
+            self.note.setText("No Proton found on this PC. Check for updates downloads the newest GE-Proton.")
+        self.filling = False
+
+    def picked(self, it, _=None):
+        if self.filling or it is None:
+            return
+        name = it.data(Qt.ItemDataRole.UserRole)
+        proton.set_choice(self.game, name)
+        self.note.setText(f"{self.game.name} uses {name}." if name else f"{self.game.name} uses the default.")
+
+    def check(self):
+        self.check_btn.setEnabled(False)
+        self.check_btn.setText("Checking...")
+
+        def reset():
+            self.check_btn.setEnabled(True)
+            self.check_btn.setText("Check for updates")
+
+        def fail(msg):
+            reset()
+            self.note.setText(f"Couldn't check: {msg}")
+
+        def got(info):
+            if info["have"]:
+                reset()
+                self.note.setText(f"{info['name']} is the newest GE-Proton, and it's installed.")
+                return
+            size = f" ({human(info['size'])})" if info.get("size") else ""
+            if QMessageBox.question(self, "A newer GE-Proton", f"{info['name']} is out{size}. Download and install "
+                                    "it? It's checked against the release's checksum first.") \
+                    != QMessageBox.StandardButton.Yes:
+                reset()
+                self.note.setText(f"{info['name']} is available.")
+                return
+
+            def prog(a, b):
+                self.check_btn.setText(f"Downloading... {a * 100 // b}%" if b else "Downloading...")
+
+            def done(_):
+                reset()
+                self.fill()
+                self.note.setText(f"{info['name']} is installed. Pick it above to use it for this game.")
+
+            tasks.run(lambda p: proton.ge_install(info, p), done, fail, progress=prog)
+
+        tasks.run(proton.ge_latest, got, fail)
+
+
 class ImportProfileDialog(QDialog):
     """a profile code, or an .r2z file, from r2modman or Gale"""
     def __init__(self, parent):
@@ -590,6 +689,11 @@ class AddGameDialog(QDialog):
         self.list.setObjectName("plain")
         self.list.itemDoubleClicked.connect(lambda _: self.add_known())
         kv.addWidget(self.list, 1)
+        # your own copy of a supported game (not Steam's): every game is offered, the ones Steam has
+        # too; you pick the folder, and Play never goes through Steam for it
+        self.no_id = QCheckBox("No Steam id: my own copy (pick its folder; never started through Steam)")
+        self.no_id.toggled.connect(lambda _: self.fill())
+        kv.addWidget(self.no_id)
         row = QHBoxLayout()
         row.addWidget(label("Games found in Steam are listed by themselves. Add one that's somewhere else and "
                             "pick its folder.", "small", True), 1)
@@ -629,7 +733,7 @@ class AddGameDialog(QDialog):
         self.c_ts.setPlaceholderText("optional: the name in thunderstore.io/c/<name>")
         f.addRow("Thunderstore", self.c_ts)
         self.c_launch = QLineEdit()
-        self.c_launch.setPlaceholderText("optional: a command (otherwise Steam starts it)")
+        self.c_launch.setPlaceholderText("optional: a command (otherwise Hangar, or the game's own program; never Steam)")
         f.addRow("Launch with", self.c_launch)
         f.addRow(button("Add this game", self.add_custom, "primary"))
         self.stack.addWidget(custom)
@@ -641,11 +745,11 @@ class AddGameDialog(QDialog):
         self.list.clear()
         q = self.filter.text().strip().lower()
         for gid, spec in sorted(games.GAMES.items(), key=lambda kv: kv[1]["name"].lower()):
-            if gid in self.listed or (q and q not in spec["name"].lower()):
+            if (gid in self.listed and not self.no_id.isChecked()) or (q and q not in spec["name"].lower()):
                 continue
             g = games.make_game(gid, spec)
             extras = [x for x in ("Nexus" if spec.get("nexus") else "", "Thunderstore" if spec.get("thunderstore") else "") if x]
-            it = QListWidgetItem(f"{spec['name']}    —  {'installed' if g.found else 'not found'}"
+            it = QListWidgetItem(f"{spec['name']}    —  {('in your list' if gid in self.listed else 'installed') if g.found else 'not found'}"
                                  f"{'  ·  ' + ', '.join(extras) if extras else ''}")
             it.setData(Qt.ItemDataRole.UserRole, gid)
             self.list.addItem(it)
@@ -656,7 +760,8 @@ class AddGameDialog(QDialog):
             return
         gid = it.data(Qt.ItemDataRole.UserRole)
         g = games.make_game(gid)
-        if not g.found:
+        own = self.no_id.isChecked()
+        if own or not g.found:
             d = QFileDialog.getExistingDirectory(self, f"{g.name}'s folder", config.HOME)
             if not d:
                 return
@@ -666,6 +771,8 @@ class AddGameDialog(QDialog):
                         != QMessageBox.StandardButton.Yes:
                     return
             games.set_game_dir(gid, d)
+        if own:
+            games.set_no_steam(gid, True)
         games.add_game(gid)
         self.result_id = gid
         self.accept()
