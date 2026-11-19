@@ -108,20 +108,33 @@ def start_external(game):
     if hangar:
         return subprocess.Popen(hangar + ["--run", exe], env=env, **quiet), "Hangar"
     prefix = os.path.join(config.HOME, ".local", "share", "armory", "prefixes", game.id)
-    runner = shutil.which("umu-run") or shutil.which("wine")
-    if not runner:
-        raise OSError("This copy of the game isn't Steam's, so Armory doesn't start it through Steam, and there's "
-                      "no Hangar, umu-run or Wine to run it with. Install one, or set a command: the game "
-                      "menu, \"How Play starts it...\"")
-    os.makedirs(prefix, exist_ok=True)
-    env["WINEPREFIX"] = prefix
-    if os.path.basename(runner) == "umu-run":
+    umu = shutil.which("umu-run")
+    picked = protons.folder_for(game)          # (the Proton picked for the game, if any)
+    if umu:
+        os.makedirs(prefix, exist_ok=True)
+        env["WINEPREFIX"] = prefix
         env.setdefault("GAMEID", f"umu-{game.appid}" if game.appid else "0")
-        picked = protons.folder_for(game)       # (the Proton picked for the game; else umu's own choice)
         if picked:
             env["PROTONPATH"] = picked
-    return subprocess.Popen([runner, exe], cwd=game.path, env=env, **quiet), os.path.basename(runner)
-
+        return subprocess.Popen([umu, exe], cwd=game.path, env=env, **quiet), "umu-run"
+    # a Proton that's on this PC already (Steam's own, a GE-Proton), run directly: most people
+    # with Steam have one and neither umu-run nor Wine
+    found = protons.installed()
+    folder = picked or (found[0]["path"] if found else None)
+    if folder:
+        os.makedirs(prefix, exist_ok=True)
+        env.update(STEAM_COMPAT_DATA_PATH=prefix, STEAM_COMPAT_CLIENT_INSTALL_PATH=games.steam_root() or "")
+        return subprocess.Popen([os.path.join(folder, "proton"), "run", exe], cwd=game.path, env=env, **quiet), \
+            os.path.basename(folder)
+    wine = shutil.which("wine")
+    if wine:
+        os.makedirs(prefix, exist_ok=True)
+        env["WINEPREFIX"] = prefix
+        return subprocess.Popen([wine, exe], cwd=game.path, env=env, **quiet), "Wine"
+    raise OSError("This copy of the game isn't Steam's, so Armory doesn't start it through Steam, and there's "
+                  "nothing on this PC to run a Windows game with. The quickest fix: the game menu, \"Proton "
+                  "version...\", Check for updates (it downloads GE-Proton). Or install Hangar, umu-launcher "
+                  "or Wine, or set a command: the game menu, \"How Play starts it...\"")
 
 def play_with(game):
     """the tool Play starts the game with ("" = Steam)"""
