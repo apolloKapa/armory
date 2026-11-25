@@ -429,10 +429,12 @@ class SettingsDialog(QDialog):
 
 
 class CollectionDialog(QDialog):
-    """the mods of a Nexus collection: pick which to install (optional ones start unticked)"""
+    """the mods of a Nexus collection, or of an Amethyst export: pick which to install (optional
+    ones start unticked)"""
     def __init__(self, parent, c, store):
         super().__init__(parent)
         self.c = c
+        export = c.get("kind") == "amethyst"
         self.setWindowTitle(c["name"])
         self.resize(640, 620)
         v = QVBoxLayout(self)
@@ -447,19 +449,39 @@ class CollectionDialog(QDialog):
         self.list.setObjectName("plain")
         for f in c["files"]:
             installed = (f["mod_id"], f["file_id"]) in have
-            it = QListWidgetItem(f"{f['name']}   ·   {f['file_name']} v{f['version'] or '?'}"
+            what = f"{f['file_name']} v{f['version'] or '?'}" if f["file_name"] != f["name"] else \
+                f"v{f['version'] or '?'}"
+            it = QListWidgetItem(f"{f['name']}   ·   {what}"
                                  + ("   ·   optional" if f["optional"] else "")
+                                 + ("   ·   off in the export" if f.get("disabled") else "")
                                  + ("   ·   installed" if installed else ""))
             it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             it.setCheckState(Qt.CheckState.Unchecked if f["optional"] else Qt.CheckState.Checked)
             it.setData(Qt.ItemDataRole.UserRole, f)
             self.list.addItem(it)
-        v.addWidget(label(f"Revision {c.get('revision')}  ·  {len(c['files'])} mods", "small"))
+        size = sum(f.get("size") or 0 for f in c["files"])
+        v.addWidget(label(f"{len(c['files'])} mods from Nexus Mods" + (f"  ·  {human(size)} to download" if size else "")
+                          if export else f"Revision {c.get('revision')}  ·  {len(c['files'])} mods", "small"))
         v.addWidget(self.list, 1)
-        self.new_profile = QCheckBox("Install into a new profile named after the collection")
+        if c.get("skipped"):
+            names = ", ".join(c["skipped"][:6]) + (f" and {len(c['skipped']) - 6} more" if len(c["skipped"]) > 6 else "")
+            v.addWidget(label(f"Not from this game's Nexus Mods page, so the export doesn't say where to get "
+                              f"{'it' if len(c['skipped']) == 1 else 'them'}: {names}.", "small", True))
+        self.new_profile = QCheckBox(f"Install into a new profile named “{c['name']}”" if export else
+                                     "Install into a new profile named after the collection")
         self.new_profile.setChecked(True)
         v.addWidget(self.new_profile)
-        v.addWidget(label("Mods with an installer (FOMOD) ask their questions as they arrive. Collections can also "
+        self.settings = None
+        if c.get("settings"):
+            n = len(c["settings"])
+            self.settings = QCheckBox(f"Bring its settings too ({n} file{'s' * (n != 1)}, "
+                                      f"{human(c.get('settings_size') or 0)}): what the mods were set to in their "
+                                      "own menus")
+            self.settings.setChecked(True)
+            v.addWidget(self.settings)
+        v.addWidget(label("The mods keep the export's order and on/off. Mods with an installer (FOMOD) ask their "
+                          "questions as they arrive: the export doesn't say what was picked." if export else
+                          "Mods with an installer (FOMOD) ask their questions as they arrive. Collections can also "
                           "carry extra steps (patches, preset choices) that Armory doesn't apply.", "small", True))
         r = QHBoxLayout()
         r.addStretch(1)
@@ -695,8 +717,8 @@ class AddGameDialog(QDialog):
         self.no_id.toggled.connect(lambda _: self.fill())
         kv.addWidget(self.no_id)
         row = QHBoxLayout()
-        row.addWidget(label("Games found in Steam are listed by themselves. Add one that's somewhere else and "
-                            "pick its folder.", "small", True), 1)
+        row.addWidget(label("Games found in Steam or Heroic (GOG, Epic) are listed by themselves. Add one that's "
+                            "somewhere else and pick its folder.", "small", True), 1)
         row.addWidget(button("Add", self.add_known, "primary"))
         kv.addLayout(row)
         self.stack.addWidget(known)
@@ -708,6 +730,18 @@ class AddGameDialog(QDialog):
         f.setContentsMargins(0, 8, 0, 0)
         f.setSpacing(10)
         self.c_name = QLineEdit()
+        # the games Heroic has installed (GOG, Epic, Amazon) that Armory doesn't know by itself:
+        # picking one fills in its name and folder; Play then starts it through Heroic
+        from .. import heroic
+        known = [sp for sp in games.GAMES.values()]
+        extra = [e for e in heroic.installed() if not any(heroic.find(sp) is e for sp in known)]
+        if extra:
+            self.c_heroic = QComboBox()
+            self.c_heroic.addItem("Pick a game installed with Heroic...", None)
+            for e in sorted(extra, key=lambda e: e["title"].lower()):
+                self.c_heroic.addItem(f"{e['title']}  ·  {heroic.RUNNER_NAMES.get(e['runner'], e['runner'])}", e)
+            self.c_heroic.currentIndexChanged.connect(self.pick_heroic)
+            f.addRow("From Heroic", self.c_heroic)
         f.addRow("Name", self.c_name)
         prow = QHBoxLayout()
         self.c_path = QLineEdit()
@@ -776,6 +810,12 @@ class AddGameDialog(QDialog):
         games.add_game(gid)
         self.result_id = gid
         self.accept()
+
+    def pick_heroic(self, _=0):
+        e = self.c_heroic.currentData()
+        if e:
+            self.c_name.setText(e["title"])
+            self.c_path.setText(e["path"])
 
     def pick_path(self):
         d = QFileDialog.getExistingDirectory(self, "Game folder", self.c_path.text() or config.HOME)

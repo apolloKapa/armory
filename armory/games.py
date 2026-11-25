@@ -17,6 +17,7 @@ A path that starts with "@prefix/" is in the Proton prefix's user folder
 import os
 import re
 
+from . import heroic as heroic_games
 from .config import HOME, get, save_conf
 
 STEAM_ROOTS = [os.path.join(HOME, ".local/share/Steam"), os.path.join(HOME, ".steam/steam"),
@@ -336,6 +337,9 @@ class Game:
         self.launch = spec.get("launch", "")
         self.path = path
         self.library = library
+        # Heroic's entry for this folder (a GOG, Epic or Amazon copy): Play goes through Heroic,
+        # and the prefix is the one the game has there
+        self.heroic = heroic_games.at(path) if path and not library else None
 
     @property
     def found(self):
@@ -367,6 +371,8 @@ class Game:
         """the Proton prefix's drive_c, or None (native games, or never run)"""
         if self.spec.get("prefix"):
             return self.spec["prefix"]
+        if self.heroic:
+            return heroic_games.drive_c(self.heroic)
         if not self.appid:
             return None
         libs = ([self.library] if self.library else []) + steam_libraries()
@@ -379,7 +385,17 @@ class Game:
     @property
     def prefix_user(self):
         d = self.prefix
-        return os.path.join(d, "users", "steamuser") if d else None
+        if not d:
+            return None
+        steam = os.path.join(d, "users", "steamuser")
+        if os.path.isdir(steam) or not self.heroic:
+            return steam
+        # (a plain Wine prefix: the user folder has your own name)
+        try:
+            names = sorted(n for n in os.listdir(os.path.join(d, "users")) if n.lower() != "public")
+        except OSError:
+            names = []
+        return os.path.join(d, "users", names[0]) if names else steam
 
     @property
     def windows_build(self):
@@ -435,11 +451,18 @@ def make_game(gid, spec=None):
         return Game(gid, spec, override, lib)
     if spec.get("path"):
         return Game(gid, spec, spec["path"])
+    # Steam's copy; marked "No Steam id", Heroic's copy first (a GOG or Epic one), else Steam's folder
+    steam = None
     if spec.get("appid"):
         lib, d = steam_install(spec["appid"])
         if d and proof_ok(d, spec):
-            return Game(gid, spec, d, lib)
-    return Game(gid, spec)
+            steam = Game(gid, spec, d, lib)
+    if steam and not no_steam(gid):
+        return steam
+    h = heroic_games.find(spec)
+    if h:
+        return Game(gid, spec, h["path"])
+    return steam or Game(gid, spec)
 
 
 def detect():

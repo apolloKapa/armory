@@ -98,6 +98,33 @@ class Store:
             order.sort(key=lambda m: bool(self.mods[m].get("pin_bottom")))
             prof["order"] = order
             prof["enabled"] = [m for m in prof.get("enabled", []) if m in self.mods]
+            self._follow_import(prof)
+
+    def _follow_import(self, prof):
+        """a profile made from an imported list (an Amethyst export) keeps that list's order while
+        its mods arrive: they take the places they hold between them, in the list's order. Moving a
+        mod yourself ends it (set_order)"""
+        want = prof.get("import_order")
+        if not want:
+            return
+        rank = {k: i for i, k in enumerate(want)}
+
+        def place(mid):
+            s = self.mods[mid].get("source") or {}
+            if s.get("type") != "nexus":
+                return None
+            return rank.get(f"{int(s.get('mod_id') or 0)}:{int(s.get('file_id') or 0)}")
+
+        slots = [i for i, mid in enumerate(prof["order"]) if place(mid) is not None]
+        for i, mid in zip(slots, sorted((prof["order"][i] for i in slots), key=place)):
+            prof["order"][i] = mid
+
+    def set_import_order(self, keys):
+        """keys: "mod id:file id" of Nexus files, lowest priority first"""
+        with self.lock:
+            self.profile["import_order"] = list(keys)
+            self._sync_profiles()
+            self.save()
 
     @property
     def profile(self):
@@ -229,6 +256,7 @@ class Store:
         with self.lock:
             self.profile["order"] = [m for m in order if m in self.mods] + \
                 [m for m in self.profile["order"] if m not in order]
+            self.profile.pop("import_order", None)
             self.save()
 
     def move(self, mid, where):

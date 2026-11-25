@@ -26,6 +26,9 @@ It started as BS Mods, a Blade & Sorcery mod manager, and now handles any game.
   update with one click. Files you downloaded by hand are matched to their Nexus page by checksum.
 - **Thunderstore**: browse and search, one-click install with all dependencies (BepInExPack too),
   updates, and the website's "Install with Mod Manager" button.
+- **Heroic (GOG, Epic, Amazon)**: games installed with the Heroic Games Launcher are found by
+  themselves too. Play starts them through Heroic, and mods that go in the prefix use the one the game
+  has there.
 - **Play** puts the mods that are on in the game and starts it through Steam. When a loader needs
   a Proton DLL override (BepInEx, MelonLoader, ASI loaders) Armory shows the exact launch option
   to paste into Steam.
@@ -33,6 +36,9 @@ It started as BS Mods, a Blade & Sorcery mod manager, and now handles any game.
   same versions, its config files), and share your profile as a code or `.r2z`.
 - **Nexus Collections**: paste a collection's address (or use its "Add to collection" link) and pick
   its mods; Premium downloads them all, free accounts get each mod's Files tab opened in turn.
+- **Amethyst exports**: open an `.amethyst` file (drop it on the window, or ⋯ → Import an Amethyst
+  export) to get the same Nexus mods in the same order and on/off, in a profile of their own, with the
+  settings files that came with it (its logs and caches are left out).
 - **Requirements**: mods whose Nexus page lists required mods you don't have (or have switched off)
   get a "Needs" badge, and ⋯ → Get / Turn on fixes them. Right after you install a Nexus mod, Armory
   tells you what it still needs, with one button for all of it.

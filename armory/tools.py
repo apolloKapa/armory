@@ -93,6 +93,10 @@ def start_external(game):
     quiet = dict(start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if game.launch_command:
         return subprocess.Popen(game.launch_command, shell=True, cwd=game.path, env=env, **quiet), "your command"
+    if game.heroic:
+        # Heroic's own copy: through Heroic, with the Wine or Proton, prefix and settings it has there
+        from . import heroic
+        return subprocess.Popen(heroic.launch_command(game.heroic), env=env, **quiet), "Heroic"
     hangar = hangar_command()
     if hangar:
         eid = hangar_entry(game)

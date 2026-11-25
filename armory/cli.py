@@ -117,6 +117,9 @@ def main(argv):
         return 0
     if cmd == "install":
         for f in args[1:]:
+            if f.lower().endswith(".amethyst"):
+                print(f"{f}: an Amethyst export is a list of mods to download; import it from the Armory window")
+                continue
             os.makedirs(os.path.join(config.DATA, "tmp"), exist_ok=True)
             tmp = tempfile.mkdtemp(prefix="install-", dir=os.path.join(config.DATA, "tmp"))
             try:

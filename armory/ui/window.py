@@ -6,13 +6,15 @@ import tempfile
 import time
 import webbrowser
 
-from PyQt6.QtCore import QFileSystemWatcher, QPropertyAnimation, QRectF, Qt, QTimer, QUrl
+from PyQt6.QtCore import QFileSystemWatcher, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QUrl, QVariantAnimation
 from PyQt6.QtGui import QColor, QDesktopServices, QFont, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout,
                              QInputDialog, QLineEdit, QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea,
-                             QStackedWidget, QToolButton, QVBoxLayout, QWidget)
+                             QStackedWidget, QStyle, QStyleOptionButton, QStylePainter, QToolButton, QVBoxLayout,
+                             QWidget)
 
-from .. import VERSION, config, gamever, games, install, layout, mo2, net, nexus, saves, thunderstore, tools, updates
+from .. import (VERSION, amethyst, config, gamever, games, install, layout, mo2, net, nexus, running, saves,
+                thunderstore, tools, updates)
 from ..config import DATA, HOME
 from ..fomod import Fomod
 from ..store import DeployError, Store, resolve_case, staged_files
@@ -163,6 +165,149 @@ class Hero(QWidget):
         p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 18, 18)
 
 
+class PlayButton(QPushButton):
+    """the Play button. While the game is on its way it shows a turning ring and what's happening
+    (putting the mods in, starting), then a tick once the game is up, and goes back to Play.
+    Without animations (Settings) the ring stands still"""
+    PLAY = "▶   PLAY"
+    RING = 16           # the ring's size, and the gap to the words
+    GAP = 11
+
+    def __init__(self, slot):
+        super().__init__(self.PLAY)
+        self.setObjectName("play")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.loading = False
+        self.angle = 0.0
+        self.done_mix = 0.0         # 0: the ring, 1: the tick (it's drawn in as this goes up)
+        self._glide = None
+        self.spin = QVariantAnimation(self)
+        self.spin.setStartValue(0.0)
+        self.spin.setEndValue(360.0)
+        self.spin.setDuration(850)
+        self.spin.setLoopCount(-1)
+        self.spin.valueChanged.connect(self._turn)
+        self.back = QTimer(self)
+        self.back.setSingleShot(True)
+        self.back.timeout.connect(self.idle)
+        self.clicked.connect(lambda: None if self.loading else slot())
+
+    def _turn(self, v):
+        self.angle = float(v)
+        self.update()
+
+    def _words(self, text):
+        """change the words; the button glides to its new width instead of jumping"""
+        if text == self.text():
+            return
+        was = self.width()
+        self.setMinimumWidth(0)
+        self.setMaximumWidth(16777215)
+        self.setText(text)
+        to = self.sizeHint().width()
+        if not self.isVisible() or was < 2:
+            return
+
+        def free():
+            self.setMinimumWidth(0)
+            self.setMaximumWidth(16777215)
+
+        try:
+            # (one glide at a time: the last one would keep setting its own widths)
+            if self._glide is not None:
+                self._glide.stop()
+        except RuntimeError:
+            pass
+        self._glide = motion.tween(self, was, to, lambda v: self.setFixedWidth(int(v)), 220, done=free)
+
+    def busy(self, text):
+        self.back.stop()
+        self.loading = True
+        self.done_mix = 0.0
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self._words(text)
+        if motion.enabled() and self.spin.state() != self.spin.State.Running:
+            self.spin.start()
+        self.update()
+
+    def finish(self, text="STARTED"):
+        """the game is up: the ring closes into a tick, then it's Play again"""
+        if not self.loading:
+            return
+        self.spin.stop()
+        self._words(text)
+        motion.tween(self, 0.0, 1.0, self._tick, 320)
+        self.back.start(1700)
+
+    def _tick(self, v):
+        self.done_mix = float(v)
+        self.update()
+
+    def idle(self):
+        self.back.stop()
+        self.spin.stop()
+        if not self.loading:
+            return
+        self.loading = False
+        self.done_mix = 0.0
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._words(self.PLAY)
+        self.update()
+
+    def sizeHint(self):
+        s = super().sizeHint()
+        return QSize(s.width() + self.RING + self.GAP, s.height()) if self.loading else s
+
+    def paintEvent(self, e):
+        if not self.loading:
+            super().paintEvent(e)
+            return
+        # the button itself as the theme draws it, without its words; then the ring and the words
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+        opt.text = ""
+        sp = QStylePainter(self)
+        sp.drawControl(QStyle.ControlElement.CE_PushButton, opt)
+        sp.end()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        ink = QColor(T.ON_ACCENT if self.isEnabled() else T.DIM)
+        fm = self.fontMetrics()
+        tw = fm.horizontalAdvance(self.text())
+        x = (self.width() - (self.RING + self.GAP + tw)) / 2
+        ring = QRectF(x, (self.height() - self.RING) / 2, self.RING, self.RING)
+        pen = QPen(ink, 2.2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        faint = QColor(ink)
+        faint.setAlphaF(0.25)
+        p.setPen(QPen(faint, 2.2))
+        p.drawEllipse(ring)
+        p.setPen(pen)
+        if self.done_mix <= 0.0:
+            # (angles in sixteenths of a degree, clockwise from the top)
+            p.drawArc(ring, int((90 - self.angle) * 16), -100 * 16)
+        else:
+            # the ring fills in and a tick is drawn inside it
+            p.drawArc(ring, 90 * 16, int(-360 * 16 * self.done_mix))
+            a = ring.topLeft()
+            pts = [(0.28, 0.52), (0.44, 0.68), (0.73, 0.35)]
+            path = QPainterPath()
+            path.moveTo(a.x() + pts[0][0] * self.RING, a.y() + pts[0][1] * self.RING)
+            first = min(1.0, self.done_mix / 0.4)
+            path.lineTo(a.x() + (pts[0][0] + (pts[1][0] - pts[0][0]) * first) * self.RING,
+                        a.y() + (pts[0][1] + (pts[1][1] - pts[0][1]) * first) * self.RING)
+            if self.done_mix > 0.4:
+                second = (self.done_mix - 0.4) / 0.6
+                path.lineTo(a.x() + (pts[1][0] + (pts[2][0] - pts[1][0]) * second) * self.RING,
+                            a.y() + (pts[1][1] + (pts[2][1] - pts[1][1]) * second) * self.RING)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(path)
+        p.setPen(ink)
+        p.drawText(QRectF(x + self.RING + self.GAP, 0, tw + 4, self.height()),
+                   int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), self.text())
+
+
 class GameRow(QPushButton):
     def __init__(self, game, count):
         super().__init__()
@@ -260,6 +405,11 @@ class Window(QMainWindow):
         self.deploying = False
         self.deploy_again = False
         self.play_after = False
+        # the game Play just started, until it's up (the Play button shows it's loading)
+        self.starting = None
+        self.start_timer = QTimer(self)
+        self.start_timer.setInterval(1000)
+        self.start_timer.timeout.connect(self.check_started)
         self.page = "mods"
         self.deploy_timer = QTimer(self)
         self.deploy_timer.setSingleShot(True)
@@ -507,7 +657,7 @@ class Window(QMainWindow):
         prow = QHBoxLayout()
         prow.setSpacing(8)
         prow.addStretch(1)
-        self.play_btn = button("▶   PLAY", self.play, "play")
+        self.play_btn = PlayButton(self.play)
         prow.addWidget(self.play_btn)
         gm = QMenu(self)
         self.game_menu = gm
@@ -598,6 +748,9 @@ class Window(QMainWindow):
         g = next((x for x in self.games if x.id == gid), None)
         if not g:
             return
+        if self.game is not g:
+            # the Play button is this game's now
+            self.stop_starting()
         self.game = g
         self.store = self.store_for(g)
         for k, r in self.rows.items():
@@ -777,6 +930,7 @@ class Window(QMainWindow):
         def fail(msg):
             self.deploying = False
             self.play_after = False
+            self.play_btn.idle()
             QMessageBox.warning(self, "Couldn't put the mods in the game", msg)
             self.after_deploy()
 
@@ -835,12 +989,17 @@ class Window(QMainWindow):
     def pick_files(self):
         if not self.game:
             return
-        exts = " ".join("*" + e for e in layout.ARCHIVE_EXTS)
+        exts = " ".join("*" + e for e in layout.ARCHIVE_EXTS + (amethyst.EXT,))
         paths, _ = QFileDialog.getOpenFileNames(self, f"Mods for {self.game.name}", os.path.join(HOME, "Downloads"),
-                                                f"Mod archives ({exts});;All files (*)")
+                                                f"Mod archives and Amethyst exports ({exts});;All files (*)")
         self.install_paths(paths)
 
     def install_paths(self, paths, meta=None, replace=None, game=None, download=None):
+        # an Amethyst export is a list of mods to get, not a mod: it says which game it's for itself
+        exports = [p for p in paths if amethyst.is_export(p) and os.path.isfile(p)]
+        if exports:
+            paths = [p for p in paths if p not in exports]
+            self.import_amethyst(exports[0])
         game = game or self.game
         if not game:
             return
@@ -1003,8 +1162,10 @@ class Window(QMainWindow):
             if not meta.get("archive") and not os.path.isdir(src):
                 meta["archive"] = src
             replace = job["replace"]
+            # part of a collection or an imported list: it never asks, and says nothing about what it needs
+            job["listed"] = meta.pop("beside", False)
             if replace is None:
-                replace = self.ask_replace(st, meta, name)
+                replace = self.ask_replace(st, meta, name, job["listed"])
                 if replace is False:
                     cleanup("Not installed")
                     return
@@ -1035,15 +1196,16 @@ class Window(QMainWindow):
             else:
                 self.deploy_store(st)
             if (m.get("source") or {}).get("type") == "nexus":
-                self.fetch_requirements(st, [mid], announce=True)
+                self.fetch_requirements(st, [mid], announce=not job.get("listed"))
             if (m.get("source") or {}).get("type") == "local" and self.nexus.logged_in and g.nexus and \
                     os.path.isfile(src):
                 self.link_to_nexus(st, mid, src)
 
         tasks.run(lambda: install.unpack(src, tmp), unpacked, fail)
 
-    def ask_replace(self, st, meta, name):
-        """a mod that's already installed: replace it (an update), install next to it, or stop"""
+    def ask_replace(self, st, meta, name, beside=False):
+        """a mod that's already installed: replace it (an update), install next to it, or stop
+        beside: one of a list's files, which go next to each other (the same file is still replaced)"""
         s = meta.get("source") or {}
         if s.get("type") == "thunderstore":
             return st.find(thunderstore=s.get("full_name", ""))
@@ -1056,6 +1218,8 @@ class Window(QMainWindow):
         for mid in same:
             if (st.mods[mid].get("source") or {}).get("file_id") == s.get("file_id"):
                 return mid
+        if beside:
+            return None
         box = QMessageBox(self)
         box.setWindowTitle("Already installed")
         old = st.mods[same[0]]
@@ -1134,9 +1298,10 @@ class Window(QMainWindow):
         f = dlg.choice
         self.nexus_download(g, mod_id, f["file_id"], replace=replace)
 
-    def nexus_download(self, g, mod_id, file_id, key=None, expires=None, replace=None, known=None):
+    def nexus_download(self, g, mod_id, file_id, key=None, expires=None, replace=None, known=None, extra=None):
         """ask Nexus for the download, with the mod's details, and queue it
-        known: {"info": mod details, "file": file details} already at hand (saves two requests)"""
+        known: {"info": mod details, "file": file details} already at hand (saves two requests)
+        extra: more for the install ("beside": one of a list's files, "disabled": goes in switched off)"""
         nx = self.nexus
         lk = f"nx-{mod_id}-{file_id}-{time.time():.6f}"
         guess = (known or {}).get("info", {}).get("name") or next(
@@ -1169,6 +1334,7 @@ class Window(QMainWindow):
                 meta["name"] = f"{info.get('name')} — {f.get('name')}"
             if replace:
                 meta["replace"] = replace
+            meta.update(extra or {})
             info_tag = self.tag_info(g, f.get("name"), f.get("file_name"), f.get("description"), info.get("name"))
             if info_tag:
                 meta["tag_info"] = info_tag
@@ -1230,7 +1396,11 @@ class Window(QMainWindow):
         self.activateWindow()
         if g is not self.game:
             self.select_game(g.id)
-        self.nexus_download(g, link["mod_id"], link["file_id"], link["key"], link["expires"])
+        # one of a collection's (or an imported list's) files, clicked on the website
+        listed = next((f for f in (getattr(self, "collection_queue", None) or {}).get("files", [])
+                       if f["mod_id"] == link["mod_id"] and f["file_id"] == link["file_id"]), None)
+        self.nexus_download(g, link["mod_id"], link["file_id"], link["key"], link["expires"],
+                            extra=self.listed_file(listed)[1] if listed else None)
         self.collection_next(link["mod_id"])
 
     def account_changed(self):
@@ -1523,6 +1693,7 @@ class Window(QMainWindow):
         if not self.play_after:
             # the game always gets exactly the mods that are on, then starts
             self.play_after = True
+            self.play_btn.busy("PUTTING MODS IN")
             self.deploy_timer.stop()
             if not self.deploying:
                 self.deploy()
@@ -1530,29 +1701,90 @@ class Window(QMainWindow):
                 self.deploy_again = True
             self.say("Putting the mods in first...")
             return
+        # (what's running in its folder already isn't the game starting)
+        before = running.pids(g)
         try:
-            tool = next((t for t in tools.tools(g) if t["name"] == tools.play_with(g)), None)
-            if tool:
-                tools.run(g, tool)
-                self.say(f"Starting {g.name} with {tool['name']}...")
-                return
-            if g.external:
-                # not Steam's copy: never through Steam (it would start its own copy, or offer to install one)
-                _, how = tools.start_external(g)
-                self.say(f"Starting {g.name} with {how}...")
-                return
-            if g.launch_command:
-                subprocess.Popen(g.launch_command, shell=True, cwd=g.path, start_new_session=True,
-                                 env=config.clean_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            elif not g.appid:
-                raise OSError("There's nothing to start this game with. Set how it starts: the game menu, "
-                              "\"How Play starts it...\"")
-            else:
-                subprocess.Popen(["xdg-open", f"steam://rungameid/{g.appid}"], start_new_session=True,
-                                 env=config.clean_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self.say(f"Starting {g.name}...")
+            how = self.start_game(g)
         except OSError as e:
+            self.play_btn.idle()
             QMessageBox.warning(self, "Couldn't start it", str(e))
+            return
+        self.say(f"Starting {g.name} with {how}..." if how else f"Starting {g.name}...")
+        self.play_btn.busy("STARTING")
+        self.starting = {"game": g, "before": before, "t0": time.monotonic(), "seen": None, "gone": 0, "asking": False}
+        self.start_timer.start()
+
+    def start_game(self, g):
+        """start it: what it was started with (a tool, Hangar...), or None for the usual way"""
+        tool = next((t for t in tools.tools(g) if t["name"] == tools.play_with(g)), None)
+        if tool:
+            tools.run(g, tool)
+            return tool["name"]
+        if g.external:
+            # not Steam's copy: never through Steam (it would start its own copy, or offer to install one)
+            _, how = tools.start_external(g)
+            return how
+        if g.launch_command:
+            subprocess.Popen(g.launch_command, shell=True, cwd=g.path, start_new_session=True,
+                             env=config.clean_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif not g.appid:
+            raise OSError("There's nothing to start this game with. Set how it starts: the game menu, "
+                          "\"How Play starts it...\"")
+        else:
+            subprocess.Popen(["xdg-open", f"steam://rungameid/{g.appid}"], start_new_session=True,
+                             env=config.clean_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return None
+
+    # The Play button keeps turning until the game is up: its window is there (Hyprland and niri
+    # can be asked), or elsewhere a few seconds after its processes appear. It gives up quietly
+    # when nothing comes (Steam asking something first, a game that was running already).
+    START_SHOWN = 1.5       # the least the ring is shown, so it never just flickers
+    START_SETTLE = 8        # no window list: this long after its processes appear
+    START_NOTHING = 45      # nothing of the game seen in this long: Play again
+    START_LONGEST = 150
+
+    def stop_starting(self):
+        self.start_timer.stop()
+        self.starting = None
+        if not self.play_after:
+            self.play_btn.idle()
+
+    def check_started(self):
+        w = self.starting
+        if not w or w["asking"]:
+            return
+        g = w["game"]
+        w["asking"] = True
+
+        def look():
+            found = running.pids(g) - w["before"]
+            return bool(found), running.window(g, found)
+
+        def got(res):
+            if self.starting is not w:
+                return
+            w["asking"] = False
+            alive, window = res
+            now = time.monotonic()
+            since = now - w["t0"]
+            if alive and w["seen"] is None:
+                w["seen"] = now
+            w["gone"] = 0 if alive else w["gone"] + 1
+            up = window is True or (window is None and w["seen"] is not None and now - w["seen"] >= self.START_SETTLE)
+            if up and since >= self.START_SHOWN:
+                self.start_timer.stop()
+                self.starting = None
+                self.play_btn.finish()
+            elif (w["seen"] is not None and w["gone"] >= 3) or (w["seen"] is None and since > self.START_NOTHING) \
+                    or since > self.START_LONGEST:
+                # it came and went (closed or crashed), or never came
+                self.stop_starting()
+
+        def failed(_msg):
+            if self.starting is w:
+                w["asking"] = False
+
+        tasks.run(look, done=got, fail=failed)
 
     def set_launch_command(self):
         g = self.game
@@ -1639,6 +1871,7 @@ class Window(QMainWindow):
             m.addAction("Import from Mod Organizer 2...", self.import_mo2)
         if g.nexus:
             m.addAction("Install a Nexus collection...", lambda: self.install_collection())
+            m.addAction("Import an Amethyst export (.amethyst)...", lambda: self.import_amethyst())
         if g.thunderstore:
             m.addSeparator()
             m.addAction("Import an r2modman / Gale profile...", self.import_ts_profile)
@@ -1757,7 +1990,7 @@ class Window(QMainWindow):
         busy = {n.rsplit(".", 1)[0] for n in names if n.endswith((".part", ".crdownload", ".download", ".tmp"))}
         waiting = False
         for n in names:
-            if n in self.dl_offered or not layout.is_archive(n) or n in busy:
+            if n in self.dl_offered or not (layout.is_archive(n) or amethyst.is_export(n)) or n in busy:
                 continue
             size = os.path.getsize(os.path.join(folder, n))
             if self.dl_seen.get(n) != size:
@@ -1783,7 +2016,8 @@ class Window(QMainWindow):
         names = [os.path.basename(p) for p in self.dl_pending]
         what = names[0] if len(names) == 1 else f"{len(names)} archives ({', '.join(names[:2])}...)"
         self.dl_text.setText(f"New in Downloads: {what}")
-        self.dl_install.setText(f"Install for {self.game.name}")
+        self.dl_install.setText("Import it" if all(amethyst.is_export(n) for n in names) else
+                                f"Install for {self.game.name}")
         self.dl_bar.show()
 
     def install_offered(self):
@@ -1980,28 +2214,46 @@ class Window(QMainWindow):
                 n += 1
             st.new_profile(name, copy=False)
             self.fill_profiles()
+        for f in c["files"]:
+            f["several"] = sum(1 for x in c["files"] if x["mod_id"] == f["mod_id"]) > 1
+        self.get_listed(g, c, chosen)
+
+    @staticmethod
+    def listed_file(f):
+        """one file of a collection or an imported list: (known, extra) for nexus_download"""
+        known = {"info": {"name": f["name"], "version": f["version"], "author": f["author"],
+                          "summary": f["summary"], "picture_url": f["picture"],
+                          "contains_adult_content": f["adult"]},
+                 # several files of one mod are told apart by the file's name
+                 "file": {"name": f["file_name"], "version": f["version"],
+                          "category_name": "OPTIONAL" if f.get("several") else "MAIN"}}
+        extra = {"beside": True}
+        if f.get("disabled"):
+            extra["disabled"] = True
+        return known, extra
+
+    def get_listed(self, g, c, chosen):
+        """get the chosen files of a collection (or an imported list) that aren't installed yet"""
+        st = self.store_for(g)
         todo = []
         for f in chosen:
             have = [mid for mid, m in st.mods.items() if (m.get("source") or {}).get("type") == "nexus"
                     and int((m.get("source") or {}).get("mod_id") or 0) == f["mod_id"]
                     and int((m.get("source") or {}).get("file_id") or 0) == f["file_id"]]
             if have:
-                st.set_enabled(have[0], True)
+                st.set_enabled(have[0], not f.get("disabled"))
             else:
                 todo.append(f)
         self.changed()
         if not todo:
-            self.say("Everything in the collection is installed already")
+            self.say(f"Everything in {c['name']} is installed already")
             return
         if self.need_login():
             return
         if self.nexus.premium:
             for f in todo:
-                known = {"info": {"name": f["name"], "version": f["version"], "author": f["author"],
-                                  "summary": f["summary"], "picture_url": f["picture"],
-                                  "contains_adult_content": f["adult"]},
-                         "file": {"name": f["file_name"], "version": f["version"], "category_name": "MAIN"}}
-                self.nexus_download(g, f["mod_id"], f["file_id"], known=known)
+                known, extra = self.listed_file(f)
+                self.nexus_download(g, f["mod_id"], f["file_id"], known=known, extra=extra)
             self.say(f"Downloading {len(todo)} mods from {c['name']}")
             return
         # free accounts: Nexus wants a click on each file, so one page at a time
@@ -2032,6 +2284,86 @@ class Window(QMainWindow):
         if q and q["files"] and q["files"][0]["mod_id"] == mod_id:
             q["files"].pop(0)
             QTimer.singleShot(1500, self.collection_open_next)
+
+    # ---- Amethyst exports ----
+    def import_amethyst(self, path=None):
+        """an .amethyst file: the same Nexus mods, in the same order, in a profile of their own"""
+        if path is None:
+            path, _ = QFileDialog.getOpenFileName(self, "Amethyst export", self.downloads_folder(),
+                                                  f"Amethyst exports (*{amethyst.EXT});;All files (*)")
+            if not path:
+                return
+        os.makedirs(os.path.join(DATA, "tmp"), exist_ok=True)
+        tmp = tempfile.mkdtemp(prefix="amethyst-", dir=os.path.join(DATA, "tmp"))
+        self.say(f"Reading {os.path.basename(path)}...")
+
+        def work():
+            c = amethyst.read(path, tmp)
+            try:
+                amethyst.describe(c, nexus.details(c["domain"], [f["mod_id"] for f in c["files"]]))
+            except (net.NetError, OSError, KeyError, TypeError, ValueError):
+                pass  # the export's own names will do
+            return c
+
+        def done(c):
+            g = next((x for x in self.games if x.nexus == c["domain"]), None)
+            if not g:
+                shutil.rmtree(tmp, ignore_errors=True)
+                spec = next((sp for sp in games.GAMES.values() if sp.get("nexus") == c["domain"]), None)
+                QMessageBox.information(self, "Add the game first",
+                                        (f"That export is for {spec['name']}, which isn't in Armory's list. Add it "
+                                         "with “Add game”, then import the file again.") if spec else
+                                        (f"That export is for “{c['domain']}”, a game Armory doesn't know. You can "
+                                         "add it as another game, with that name as its Nexus Mods game."))
+                return
+            self.raise_()
+            self.activateWindow()
+            if g is not self.game:
+                self.select_game(g.id)
+            try:
+                self.pick_amethyst(g, c)
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+        def fail(msg):
+            shutil.rmtree(tmp, ignore_errors=True)
+            QMessageBox.warning(self, "Couldn't read the export", msg)
+
+        tasks.run(work, done, fail)
+
+    def pick_amethyst(self, g, c):
+        st = self.store_for(g)
+        if not c["files"] and not c["settings"]:
+            QMessageBox.information(self, c["name"], "That export has no mods from Nexus Mods in it, so there's "
+                                    "nothing Armory can get.")
+            return
+        dlg = CollectionDialog(self, c, st)
+        if not dlg.exec():
+            return
+        chosen = dlg.chosen()
+        settings = amethyst.settings_files(c, g) if dlg.settings and dlg.settings.isChecked() else []
+        if not chosen and not settings:
+            return
+        name = c["name"]
+        if dlg.new_profile.isChecked():
+            n = 2
+            while name in st.profiles:
+                name = f"{c['name']} ({n})"
+                n += 1
+            st.new_profile(name, copy=False)
+        if settings:
+            # one mod at the bottom, so its files win over the ones the mods bring
+            try:
+                st.add(f"{name} settings", settings,
+                       {"name": f"{name}: settings", "source": {"type": "local"}, "pin_bottom": True,
+                        "summary": "Settings files that came with the Amethyst export"})
+            except (DeployError, OSError) as e:
+                QMessageBox.warning(self, "Settings not imported", str(e))
+        st.set_import_order(c["order"])
+        if g.plugins and c["plugins"]:
+            st.set_plugins(c["plugins"])
+        self.fill_profiles()
+        self.get_listed(g, c, chosen)
 
     # ---- r2modman / Gale profiles ----
     def import_ts_profile(self):
@@ -2265,7 +2597,7 @@ class Window(QMainWindow):
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls() and self.game:
             e.acceptProposedAction()
-            self.overlay.text = f"Mods for {self.game.name}: .zip, .7z, .rar, or a folder"
+            self.overlay.text = f"Mods for {self.game.name}: .zip, .7z, .rar, a folder, or an .amethyst export"
             self.overlay.setGeometry(self.centralWidget().rect())
             self.overlay.raise_()
             self.overlay.show()
